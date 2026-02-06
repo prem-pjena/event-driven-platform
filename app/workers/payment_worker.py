@@ -1,14 +1,25 @@
 from sqlalchemy.future import select
+from datetime import datetime
+import uuid
+
 from app.db.session import AsyncSessionLocal
 from app.db.models import Payment, PaymentStatus
 from app.services.fake_gateway import charge, PaymentGatewayError
 from app.services.event_publisher import publish_event
 from app.core.logging import logger
-from datetime import datetime
-import uuid
 
 
 async def process_payment(payment_id: str):
+    # -------------------------
+    # DB guard (serverless-safe)
+    # -------------------------
+    if not AsyncSessionLocal:
+        logger.error(
+            "DATABASE_NOT_CONFIGURED",
+            extra={"payment_id": payment_id},
+        )
+        raise RuntimeError("Database not configured")
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(Payment).where(Payment.id == payment_id)
@@ -19,7 +30,7 @@ async def process_payment(payment_id: str):
         if not payment:
             return
 
-        # Idempotency guard (protects against retries / duplicates)
+        # Idempotency guard
         if payment.status != PaymentStatus.PENDING:
             return
 
@@ -120,10 +131,3 @@ async def process_payment(payment_id: str):
 
             # Re-raise → triggers SQS/Lambda retry
             raise
-
-
-# AWS behavior mapping:
-# - Gateway failure → payment worker retried
-# - Event publish failure → logged & observable
-# - Payment state remains immutable
-# - Notifications & analytics are eventually consistent
