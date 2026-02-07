@@ -11,7 +11,7 @@ Base = declarative_base()
 # ------------------------
 # Payment Status Enum
 # ------------------------
-class PaymentStatus(enum.Enum):
+class PaymentStatus(str, enum.Enum):
     PENDING = "PENDING"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
@@ -30,7 +30,7 @@ class Payment(Base):
     currency = Column(String, nullable=False)
 
     status = Column(
-        Enum(PaymentStatus),
+        Enum(PaymentStatus, name="paymentstatus"),  # ✅ MUST MATCH DB ENUM
         nullable=False,
         default=PaymentStatus.PENDING,
     )

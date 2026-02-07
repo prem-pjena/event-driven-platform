@@ -1,14 +1,20 @@
 FROM public.ecr.aws/lambda/python:3.11
 
-# Lambda working directory
 WORKDIR /var/task
 
-# Install PROD-only dependencies
-COPY requirements/prod.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# --------------------------------------------------
+# Dependencies
+# --------------------------------------------------
+COPY requirements/ ./requirements/
+RUN pip install --no-cache-dir -r requirements/prod.txt
 
-# Copy application code
+# --------------------------------------------------
+# Application code
+# --------------------------------------------------
 COPY app ./app
 
-# Lambda entrypoint (Mangum handler)
+# --------------------------------------------------
+# DEFAULT handler (API)
+# Worker Lambda overrides this in Terraform
+# --------------------------------------------------
 CMD ["app.main.handler"]

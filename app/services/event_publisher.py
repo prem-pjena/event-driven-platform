@@ -7,12 +7,11 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------
-# Environment-based switch
+# Environment config
 # --------------------------------------------------
-USE_AWS = os.getenv("USE_AWS_EVENTS", "false").lower() == "true"
-EVENT_BUS_NAME = os.getenv("EVENT_BUS_NAME", "default")
+USE_AWS_EVENTS = os.getenv("USE_AWS_EVENTS", "false").lower() == "true"
+EVENT_BUS_NAME = os.getenv("EVENT_BUS_NAME", "payments-bus")
 
-# Lazy client (safe for Lambda cold starts)
 _eventbridge_client = None
 
 
@@ -24,38 +23,30 @@ def get_eventbridge_client():
 
 
 # --------------------------------------------------
-# Event Publisher
+# Event Publisher (SYNC BY DESIGN)
 # --------------------------------------------------
-async def publish_event(event_type: str, payload: dict):
+def publish_event(event_type: str, payload: dict):
     """
-    Publishes domain events.
+    Best-effort domain event publisher.
 
-    Local:
-      - Logs event only
-
-    AWS:
-      - Sends event to EventBridge
+    Guarantees:
+    - Never blocks API response
+    - Never returns non-JSON objects
+    - Raises only on hard AWS failure
     """
 
-    # Always log (observability)
     logger.info(
-        "EVENT_PUBLISHED",
+        "EVENT_PUBLISH_ATTEMPT",
         extra={
             "event_type": event_type,
-            "payload": payload,
-            "aws_enabled": USE_AWS,
+            "aws_enabled": USE_AWS_EVENTS,
         },
     )
 
-    # ----------------------------------------------
-    # Local mode (no AWS)
-    # ----------------------------------------------
-    if not USE_AWS:
+    # Local / dev mode
+    if not USE_AWS_EVENTS:
         return
 
-    # ----------------------------------------------
-    # AWS EventBridge mode
-    # ----------------------------------------------
     try:
         client = get_eventbridge_client()
 
@@ -71,18 +62,16 @@ async def publish_event(event_type: str, payload: dict):
         )
 
         if response.get("FailedEntryCount", 0) > 0:
-            logger.error(
-                "EVENTBRIDGE_PUBLISH_PARTIAL_FAILURE",
-                extra={"response": response},
-            )
-            raise RuntimeError("EventBridge publish failed")
+            raise RuntimeError(f"EventBridge failure: {response}")
+
+        logger.info(
+            "EVENT_PUBLISH_SUCCESS",
+            extra={"event_type": event_type},
+        )
 
     except ClientError as exc:
         logger.error(
-            "EVENTBRIDGE_PUBLISH_ERROR",
-            extra={
-                "event_type": event_type,
-                "error": str(exc),
-            },
+            "EVENT_PUBLISH_ERROR",
+            extra={"error": str(exc)},
         )
         raise

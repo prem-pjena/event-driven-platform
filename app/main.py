@@ -1,26 +1,27 @@
 import uuid
 from fastapi import FastAPI, Request
 from mangum import Mangum
+from sqlalchemy import text
 
 from app.api.routes import payments, notifications
-from app.workers.payment_worker import process_payment
-from app.workers.notification_worker import process_notification
-from app.services.analytics_job import run_daily_analytics
 from app.core.logging import logger
+from app.db.session import engine
+from app.db.models import Base
 
-# ==========================================================
-# FastAPI app (MUST be created FIRST)
-# ==========================================================
-app = FastAPI(title="Event Driven Platform")
+# --------------------------------------------------
+# FastAPI app
+# --------------------------------------------------
+# 🔥 CRITICAL FIX: disable slash redirect for API Gateway
+app = FastAPI(
+    title="Event Driven Platform",
+    redirect_slashes=False,
+)
 
-# ==========================================================
-# Lambda adapter (wrap AFTER app creation)
-# ==========================================================
-handler = Mangum(app)
+print("🔥🔥 API IMAGE VERSION: 2026-02-07-FINAL-SLASH-FIX 🔥🔥")
 
-# ==========================================================
-# Middleware: Correlation / Request ID
-# ==========================================================
+# --------------------------------------------------
+# Middleware: Request ID
+# --------------------------------------------------
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
     request_id = str(uuid.uuid4())
@@ -39,41 +40,34 @@ async def add_request_id(request: Request, call_next):
     )
     return response
 
-# ==========================================================
-# Routers (PUBLIC)
-# ==========================================================
+# --------------------------------------------------
+# Routes
+# --------------------------------------------------
 app.include_router(payments.router, prefix="/payments", tags=["payments"])
 app.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
 
-# ==========================================================
-# Health Check (used by ALB / API Gateway)
-# ==========================================================
+# --------------------------------------------------
+# Health
+# --------------------------------------------------
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-# ==========================================================
-# Startup hook (SAFE for Lambda)
-# ==========================================================
+# --------------------------------------------------
+# Startup (SAFE for Lambda)
+# --------------------------------------------------
 @app.on_event("startup")
 async def startup():
     logger.info("APPLICATION_STARTUP")
 
-# ==========================================================
-# INTERNAL ENDPOINTS (LOCAL DEV / TEST ONLY)
-# In AWS these are replaced by SQS / EventBridge triggers
-# ==========================================================
-@app.post("/internal/process-payment/{payment_id}")
-async def trigger_payment_worker(payment_id: str):
-    await process_payment(payment_id)
-    return {"status": "payment processing triggered"}
+    async with engine.begin() as conn:
+        # ✅ force DB connection check
+        await conn.execute(text("SELECT 1"))
 
-@app.post("/internal/process-notification/{event_type}")
-async def trigger_notification_worker(event_type: str, payload: dict):
-    await process_notification(event_type, payload)
-    return {"status": "notification triggered"}
+        # ✅ safe for Lambda (no migrations)
+        await conn.run_sync(Base.metadata.create_all)
 
-@app.post("/internal/run-analytics")
-async def trigger_analytics_job():
-    await run_daily_analytics()
-    return {"status": "analytics completed"}
+# --------------------------------------------------
+# Lambda adapter (MUST be last)
+# --------------------------------------------------
+handler = Mangum(app)

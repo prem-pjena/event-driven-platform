@@ -1,10 +1,19 @@
-import pandas as pd
 from sqlalchemy.future import select
-from app.db.session import AsyncSessionLocal
-from app.db.models import Payment, PaymentStatus, DailyPaymentAnalytics
 from datetime import date
 
+from app.db.session import AsyncSessionLocal
+from app.db.models import Payment, DailyPaymentAnalytics
+
+
 async def run_daily_analytics():
+    """
+    Daily analytics job.
+
+    Pandas is imported lazily to avoid bloating
+    the API Lambda cold start.
+    """
+    import pandas as pd  # 🔥 LAZY IMPORT (CRITICAL)
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Payment))
         payments = result.scalars().all()
@@ -12,10 +21,15 @@ async def run_daily_analytics():
         if not payments:
             return
 
-        df = pd.DataFrame([{
-            "status": p.status.value,
-            "created_at": p.created_at.date()
-        } for p in payments])
+        df = pd.DataFrame(
+            [
+                {
+                    "status": p.status.value,
+                    "created_at": p.created_at.date(),
+                }
+                for p in payments
+            ]
+        )
 
         today = date.today()
         today_df = df[df["created_at"] == today]
@@ -31,7 +45,7 @@ async def run_daily_analytics():
             total_payments=total,
             successful_payments=success,
             failed_payments=failed,
-            failure_rate=failure_rate
+            failure_rate=failure_rate,
         )
 
         session.add(analytics)
