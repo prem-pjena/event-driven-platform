@@ -2,7 +2,7 @@ from sqlalchemy.future import select
 from datetime import datetime
 import uuid
 
-from app.db.session import AsyncSessionLocal
+from app.db.session import create_session_factory
 from app.db.models import Payment, PaymentStatus
 from app.services.fake_gateway import charge, PaymentGatewayError
 from app.services.event_publisher import publish_event
@@ -12,80 +12,109 @@ print("🔥🔥 WORKER IMAGE VERSION: 2026-02-08-PAYMENT-WORKER-LAMBDA-SAFE 🔥
 
 
 async def process_payment(payment_id: str):
-    if AsyncSessionLocal is None:
-        logger.error("DATABASE_NOT_CONFIGURED", extra={"payment_id": payment_id})
-        raise RuntimeError("Database not configured")
+    """
+    Async, Lambda-safe payment processor.
 
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Payment).where(Payment.id == payment_id)
-        )
-        payment = result.scalar_one_or_none()
+    Guarantees:
+    - DB engine bound to CURRENT event loop
+    - Proper cleanup before loop closes
+    - No asyncpg / SQLAlchemy loop corruption
+    """
 
-        if not payment:
-            logger.warning("PAYMENT_NOT_FOUND", extra={"payment_id": payment_id})
-            return
+    engine, SessionLocal = create_session_factory()
 
-        if payment.status != PaymentStatus.PENDING:
-            logger.info(
-                "PAYMENT_ALREADY_PROCESSED",
-                extra={"payment_id": payment_id, "status": payment.status.value},
+    try:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(Payment).where(Payment.id == payment_id)
             )
-            return
+            payment = result.scalar_one_or_none()
 
-        try:
-            await charge(payment.amount)
+            if not payment:
+                logger.warning(
+                    "PAYMENT_NOT_FOUND",
+                    extra={"payment_id": payment_id},
+                )
+                return
 
-            payment.status = PaymentStatus.SUCCESS
-            payment.processed_at = datetime.utcnow()
-            await session.commit()
+            if payment.status != PaymentStatus.PENDING:
+                logger.info(
+                    "PAYMENT_ALREADY_PROCESSED",
+                    extra={
+                        "payment_id": payment_id,
+                        "status": payment.status.value,
+                    },
+                )
+                return
 
-            logger.info(
-                "PAYMENT_SUCCESS",
-                extra={
-                    "payment_id": str(payment.id),
-                    "user_id": str(payment.user_id),
-                    "amount": payment.amount,
-                    "currency": payment.currency,
-                },
-            )
+            try:
+                # -------------------------
+                # External gateway
+                # -------------------------
+                await charge(payment.amount)
 
-            # ✅ SAFE: await event publishing
-            await publish_event(
-                "payment.success",
-                {
-                    "event_id": str(uuid.uuid4()),
-                    "payment_id": str(payment.id),
-                    "user_id": str(payment.user_id),
-                    "amount": payment.amount,
-                    "currency": payment.currency,
-                    "occurred_at": payment.processed_at.isoformat(),
-                },
-            )
+                # -------------------------
+                # Persist SUCCESS
+                # -------------------------
+                payment.status = PaymentStatus.SUCCESS
+                payment.processed_at = datetime.utcnow()
+                await session.commit()
 
-        except PaymentGatewayError:
-            payment.status = PaymentStatus.FAILED
-            payment.processed_at = datetime.utcnow()
-            await session.commit()
+                logger.info(
+                    "PAYMENT_SUCCESS",
+                    extra={
+                        "payment_id": str(payment.id),
+                        "user_id": str(payment.user_id),
+                        "amount": payment.amount,
+                        "currency": payment.currency,
+                    },
+                )
 
-            logger.info(
-                "PAYMENT_FAILED",
-                extra={
-                    "payment_id": str(payment.id),
-                    "user_id": str(payment.user_id),
-                },
-            )
+                publish_event(
+                    "payment.success",
+                    {
+                        "event_id": str(uuid.uuid4()),
+                        "payment_id": str(payment.id),
+                        "user_id": str(payment.user_id),
+                        "amount": payment.amount,
+                        "currency": payment.currency,
+                        "occurred_at": payment.processed_at.isoformat(),
+                    },
+                )
 
-            await publish_event(
-                "payment.failed",
-                {
-                    "event_id": str(uuid.uuid4()),
-                    "payment_id": str(payment.id),
-                    "user_id": str(payment.user_id),
-                    "amount": payment.amount,
-                    "currency": payment.currency,
-                    "occurred_at": payment.processed_at.isoformat(),
-                },
-            )
+            except PaymentGatewayError:
+                # -------------------------
+                # Rollback before failure update
+                # -------------------------
+                await session.rollback()
 
-            return
+                # -------------------------
+                # Persist FAILURE
+                # -------------------------
+                payment.status = PaymentStatus.FAILED
+                payment.processed_at = datetime.utcnow()
+                await session.commit()
+
+                logger.info(
+                    "PAYMENT_FAILED",
+                    extra={
+                        "payment_id": str(payment.id),
+                        "user_id": str(payment.user_id),
+                    },
+                )
+
+                publish_event(
+                    "payment.failed",
+                    {
+                        "event_id": str(uuid.uuid4()),
+                        "payment_id": str(payment.id),
+                        "user_id": str(payment.user_id),
+                        "amount": payment.amount,
+                        "currency": payment.currency,
+                        "occurred_at": payment.processed_at.isoformat(),
+                    },
+                )
+
+    finally:
+        # 🔥 CRITICAL: dispose engine BEFORE event loop closes
+        await engine.dispose()

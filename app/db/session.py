@@ -1,32 +1,60 @@
 import os
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+from typing import Tuple
+
+from sqlalchemy.ext.asyncio import (
+    create_async_engine,
+    AsyncSession,
+    async_sessionmaker,
+)
 
 # --------------------------------------------------
-# Database URL (from env / Secrets Manager)
+# Database URL
 # --------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set")
 
-# --------------------------------------------------
-# Async SQLAlchemy Engine (Lambda-safe)
-# --------------------------------------------------
-engine = create_async_engine(
+# ==================================================
+# API / FastAPI (GLOBAL ENGINE — SAFE)
+# ==================================================
+_engine = create_async_engine(
     DATABASE_URL,
-    echo=False,                  # NEVER echo SQL in production
-    pool_pre_ping=True,          # detects stale connections
-    pool_size=5,                 # conservative for Lambda
-    max_overflow=0,              # prevents connection storms
+    echo=False,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=0,
     future=True,
 )
 
-# --------------------------------------------------
-# Async Session Factory
-# --------------------------------------------------
-AsyncSessionLocal = sessionmaker(
-    bind=engine,
+AsyncSessionLocal = async_sessionmaker(
+    bind=_engine,
     class_=AsyncSession,
     expire_on_commit=False,
 )
+
+# ==================================================
+# Lambda / Workers (PER INVOCATION)
+# ==================================================
+def create_session_factory() -> Tuple:
+    """
+    Creates a NEW async engine + sessionmaker
+    bound to the CURRENT asyncio event loop.
+    """
+
+    engine = create_async_engine(
+        DATABASE_URL,
+        echo=False,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=0,
+        future=True,
+    )
+
+    SessionLocal = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+    return engine, SessionLocal

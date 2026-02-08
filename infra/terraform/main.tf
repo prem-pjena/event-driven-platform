@@ -1,4 +1,11 @@
 ########################################
+# Locals
+########################################
+locals {
+  event_bus_name = "payments-bus"
+}
+
+########################################
 # ECR Repository
 ########################################
 resource "aws_ecr_repository" "lambda_repo" {
@@ -37,7 +44,7 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
 }
 
 ########################################
-# EventBridge permissions
+# EventBridge Permissions (SCOPED)
 ########################################
 resource "aws_iam_role_policy" "lambda_eventbridge_policy" {
   name = "${var.project_name}-lambda-eventbridge"
@@ -48,29 +55,7 @@ resource "aws_iam_role_policy" "lambda_eventbridge_policy" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["events:PutEvents"]
-      Resource = "*"
-    }]
-  })
-}
-
-########################################
-# SQS permissions (🔥 REQUIRED 🔥)
-########################################
-resource "aws_iam_role_policy" "lambda_sqs_policy" {
-  name = "${var.project_name}-lambda-sqs"
-  role = aws_iam_role.lambda_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "sqs:ReceiveMessage",
-        "sqs:DeleteMessage",
-        "sqs:GetQueueAttributes",
-        "sqs:ChangeMessageVisibility"
-      ]
-      Resource = aws_sqs_queue.payment_queue.arn
+      Resource = aws_cloudwatch_event_bus.payments_bus.arn
     }]
   })
 }
@@ -97,7 +82,7 @@ resource "aws_subnet" "subnet_b" {
 }
 
 ########################################
-# Security Group
+# Security Group (Lambda + RDS)
 ########################################
 resource "aws_security_group" "lambda_db_sg" {
   vpc_id = aws_vpc.main.id
@@ -152,8 +137,15 @@ resource "aws_secretsmanager_secret" "database_url" {
 }
 
 resource "aws_secretsmanager_secret_version" "database_url_version" {
-  secret_id     = aws_secretsmanager_secret.database_url.id
+  secret_id = aws_secretsmanager_secret.database_url.id
   secret_string = "postgresql+asyncpg://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:5432/${var.db_name}"
+}
+
+########################################
+# EventBridge Bus (CRITICAL)
+########################################
+resource "aws_cloudwatch_event_bus" "payments_bus" {
+  name = local.event_bus_name
 }
 
 ########################################
@@ -177,12 +169,17 @@ resource "aws_lambda_function" "api" {
     variables = {
       DATABASE_URL   = aws_secretsmanager_secret_version.database_url_version.secret_string
       USE_AWS_EVENTS = "true"
+      EVENT_BUS_NAME = aws_cloudwatch_event_bus.payments_bus.name
     }
   }
+
+  depends_on = [
+    aws_iam_role_policy.lambda_eventbridge_policy
+  ]
 }
 
 ########################################
-# API Gateway
+# API Gateway (HTTP API v2)
 ########################################
 resource "aws_apigatewayv2_api" "http_api" {
   name          = "${var.project_name}-http-api"
@@ -195,9 +192,15 @@ resource "aws_apigatewayv2_integration" "lambda_integration" {
   integration_uri  = aws_lambda_function.api.invoke_arn
 }
 
-resource "aws_apigatewayv2_route" "default_route" {
+resource "aws_apigatewayv2_route" "proxy_route" {
   api_id    = aws_apigatewayv2_api.http_api.id
-  route_key = "$default"
+  route_key = "ANY /{proxy+}"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
+}
+
+resource "aws_apigatewayv2_route" "root_route" {
+  api_id    = aws_apigatewayv2_api.http_api.id
+  route_key = "ANY /"
   target    = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
 }
 
@@ -216,7 +219,7 @@ resource "aws_lambda_permission" "api_gateway" {
 }
 
 ########################################
-# SQS
+# SQS + DLQ
 ########################################
 resource "aws_sqs_queue" "payment_dlq" {
   name = "${var.project_name}-payment-dlq"
@@ -224,11 +227,85 @@ resource "aws_sqs_queue" "payment_dlq" {
 
 resource "aws_sqs_queue" "payment_queue" {
   name                       = "${var.project_name}-payment-queue"
-  visibility_timeout_seconds = 60
+  visibility_timeout_seconds = 120
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.payment_dlq.arn
     maxReceiveCount     = 5
+  })
+}
+
+########################################
+# CUSTOM SQS IAM POLICY (CORRECT)
+########################################
+resource "aws_iam_policy" "lambda_sqs_policy" {
+  name = "event-platform-lambda-sqs-access"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ChangeMessageVisibility"
+      ]
+      Resource = aws_sqs_queue.payment_queue.arn
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_sqs_access" {
+  role       = aws_iam_role.lambda_role.name
+  policy_arn = aws_iam_policy.lambda_sqs_policy.arn
+}
+
+########################################
+# EventBridge Rule
+########################################
+resource "aws_cloudwatch_event_rule" "payment_events" {
+  name           = "${var.project_name}-payment-events"
+  event_bus_name = aws_cloudwatch_event_bus.payments_bus.name
+
+  event_pattern = jsonencode({
+    source = ["event-platform.payments"]
+    detail-type = [
+      "payment.created.v1",
+      "payment.success",
+      "payment.failed"
+    ]
+  })
+}
+
+########################################
+# EventBridge → SQS Target
+########################################
+resource "aws_cloudwatch_event_target" "payment_to_sqs" {
+  rule           = aws_cloudwatch_event_rule.payment_events.name
+  event_bus_name = aws_cloudwatch_event_bus.payments_bus.name
+  arn            = aws_sqs_queue.payment_queue.arn
+}
+
+########################################
+# Allow EventBridge → SQS
+########################################
+resource "aws_sqs_queue_policy" "allow_eventbridge" {
+  queue_url = aws_sqs_queue.payment_queue.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = { Service = "events.amazonaws.com" }
+      Action   = "sqs:SendMessage"
+      Resource = aws_sqs_queue.payment_queue.arn
+      Condition = {
+        ArnEquals = {
+          "aws:SourceArn" = aws_cloudwatch_event_rule.payment_events.arn
+        }
+      }
+    }]
   })
 }
 
@@ -257,7 +334,7 @@ resource "aws_lambda_function" "payment_worker" {
 }
 
 ########################################
-# SQS → Lambda mapping (🔥 DEPENDS_ON 🔥)
+# SQS → Lambda Trigger
 ########################################
 resource "aws_lambda_event_source_mapping" "sqs_trigger" {
   event_source_arn = aws_sqs_queue.payment_queue.arn
@@ -265,6 +342,6 @@ resource "aws_lambda_event_source_mapping" "sqs_trigger" {
   batch_size       = 1
 
   depends_on = [
-    aws_iam_role_policy.lambda_sqs_policy
+    aws_iam_role_policy_attachment.lambda_sqs_access
   ]
 }

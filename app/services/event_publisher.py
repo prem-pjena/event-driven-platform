@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 # Environment config
 # --------------------------------------------------
 USE_AWS_EVENTS = os.getenv("USE_AWS_EVENTS", "false").lower() == "true"
-EVENT_BUS_NAME = os.getenv("EVENT_BUS_NAME", "payments-bus")
+EVENT_BUS_NAME = os.getenv("EVENT_BUS_NAME", "default")
 
 _eventbridge_client = None
 
@@ -23,15 +23,16 @@ def get_eventbridge_client():
 
 
 # --------------------------------------------------
-# Event Publisher (SYNC BY DESIGN)
+# Event Publisher (SYNC BY DESIGN ✅)
 # --------------------------------------------------
-def publish_event(event_type: str, payload: dict):
+def publish_event(event_type: str, payload: dict) -> None:
     """
     Best-effort domain event publisher.
 
-    Guarantees:
-    - Never blocks API response
-    - Never returns non-JSON objects
+    Design guarantees:
+    - SYNC function (safe with boto3)
+    - Never awaited
+    - Non-blocking in async flows
     - Raises only on hard AWS failure
     """
 
@@ -43,8 +44,9 @@ def publish_event(event_type: str, payload: dict):
         },
     )
 
-    # Local / dev mode
+    # Local / dev / tests
     if not USE_AWS_EVENTS:
+        logger.info("EVENT_PUBLISH_SKIPPED_LOCAL")
         return
 
     try:

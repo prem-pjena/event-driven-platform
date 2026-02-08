@@ -55,7 +55,7 @@ Client           API Lambda            PostgreSQL
   | POST /payments   |                     |
   |----------------->|                     |
   |                  | Validate request    |
-  |                  | Require idempotency|
+  |                  | Require idempotency |
   |                  | Insert payment      |
   |                  | status = PENDING    |
   |                  |-------------------->|
@@ -150,7 +150,7 @@ Guarantees:
 
 
 ====================================================
-CORE CAPABILITIES (IMPLEMENTED UP TO PHASE 1.2)
+CORE CAPABILITIES (IMPLEMENTED UP TO PHASE 1.3)
 ====================================================
 
 - Asynchronous, non-blocking API design using FastAPI
@@ -164,7 +164,10 @@ CORE CAPABILITIES (IMPLEMENTED UP TO PHASE 1.2)
 - Infrastructure as Code using Terraform
 - Fully containerized Lambdas using separate Docker images
 - Clean Lambda handler separation (API vs Worker)
-- Lambda-safe execution (no async coroutine returned to runtime)
+- Lambda-safe async execution (single event loop per invocation)
+- Async SQLAlchemy usage without cross-loop contamination
+- Explicit engine lifecycle management per worker invocation
+- End-to-end event flow verified in AWS (no mocks)
 
 
 ====================================================
@@ -181,6 +184,8 @@ CURRENT SYSTEM BEHAVIOR (VERIFIED END-TO-END)
 - Duplicate requests return the original persisted payment
 - API Lambda does NOT execute payments or publish events
 - Event emission and execution happen asynchronously
+- EventBridge successfully publishes domain events
+- Events are delivered to SQS and consumed by worker Lambda
 - Worker Lambda:
   - Triggered only by SQS
   - Consumes EventBridge-shaped events
@@ -246,15 +251,18 @@ Behavior:
 DEPLOYMENT STATUS
 ====================================================
 
-Completed (Phase 1.1 + 1.2):
+Completed (Phase 1.1 + 1.2 + 1.3):
 - Split Lambda images (API / Worker)
 - Separate Dockerfiles for API and Worker
 - Correct CMD per image
 - API Lambda uses Mangum handler only
 - Worker Lambda uses SQS handler only
 - No async coroutine returned to Lambda runtime
-- Terraform-managed AWS infrastructure
+- Async SQLAlchemy usage is Lambda-safe
+- EventBridge → SQS → Worker integration verified
 - End-to-end API → DB → EventBridge → SQS → Worker flow verified in AWS
+- Payment status transitions verified via real AWS execution
+- Retry behavior validated under worker failure scenarios
 
 Next Phase:
 - Remove DB schema creation from startup
