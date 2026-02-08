@@ -47,7 +47,7 @@ Client latency is fully isolated from payment execution and downstream side effe
 
 
 ====================================================
-SEQUENCE DIAGRAM — PAYMENT CREATION
+SEQUENCE DIAGRAM — PAYMENT CREATION (SYNC PATH)
 ====================================================
 
 Client           API Lambda            PostgreSQL
@@ -55,7 +55,7 @@ Client           API Lambda            PostgreSQL
   | POST /payments   |                     |
   |----------------->|                     |
   |                  | Validate request    |
-  |                  | Check idempotency   |
+  |                  | Require idempotency|
   |                  | Insert payment      |
   |                  | status = PENDING    |
   |                  |-------------------->|
@@ -67,11 +67,12 @@ Client           API Lambda            PostgreSQL
 Properties:
 - No external calls in API path
 - Deterministic and retry-safe
-- Idempotency guaranteed by DB + request key
+- Idempotency guaranteed by request key + DB constraints
+- API Lambda uses Mangum handler only (Lambda-safe)
 
 
 ====================================================
-SEQUENCE DIAGRAM — ASYNCHRONOUS EXECUTION
+SEQUENCE DIAGRAM — ASYNCHRONOUS EXECUTION (WORKER)
 ====================================================
 
 PostgreSQL     EventBridge        SQS Queue        Worker Lambda
@@ -90,9 +91,10 @@ PostgreSQL     EventBridge        SQS Queue        Worker Lambda
 
 
 Properties:
-- At-least-once delivery
-- Effectively-once processing
-- Terminal state committed before side effects
+- At-least-once delivery via SQS
+- Effectively-once processing via state checks
+- Terminal state committed before emitting outcome events
+- Worker Lambda uses SQS handler only (no HTTP / Mangum)
 
 
 ====================================================
@@ -101,7 +103,7 @@ FAILURE SCENARIO — WORKER FAILURE (RETRY SAFE)
 
 Worker Lambda
      |
-     | Charge gateway fails / timeout
+     | Gateway timeout / exception
      v
 Exception thrown
      |
@@ -113,13 +115,13 @@ Message retried automatically
      |
      +--> Payment still PENDING → retry allowed
      |
-     +--> Payment terminal → no-op, exit safely
+     +--> Payment terminal → safe no-op
 
 
 Guarantees:
 - No double charging
-- No inconsistent state
-- Retries are safe and bounded
+- No inconsistent payment state
+- Retries are safe, bounded, and deterministic
 
 
 ====================================================
@@ -140,6 +142,7 @@ DB lookup finds existing payment
      v
 Original response returned
 
+
 Guarantees:
 - Exactly-once payment creation
 - Safe client retries
@@ -147,7 +150,7 @@ Guarantees:
 
 
 ====================================================
-CORE CAPABILITIES (IMPLEMENTED)
+CORE CAPABILITIES (IMPLEMENTED UP TO PHASE 1.2)
 ====================================================
 
 - Asynchronous, non-blocking API design using FastAPI
@@ -160,7 +163,8 @@ CORE CAPABILITIES (IMPLEMENTED)
 - Failure isolation between API, payments, and downstream consumers
 - Infrastructure as Code using Terraform
 - Fully containerized Lambdas using separate Docker images
-- Cloud-native deployment on AWS (Lambda, API Gateway, RDS, SQS)
+- Clean Lambda handler separation (API vs Worker)
+- Lambda-safe execution (no async coroutine returned to runtime)
 
 
 ====================================================
@@ -169,6 +173,7 @@ CURRENT SYSTEM BEHAVIOR (VERIFIED END-TO-END)
 
 - Clients call POST /payments
 - API Lambda:
+  - Uses Mangum handler only
   - Validates request
   - Requires Idempotency-Key
   - Persists payment with status = PENDING
@@ -177,11 +182,13 @@ CURRENT SYSTEM BEHAVIOR (VERIFIED END-TO-END)
 - API Lambda does NOT execute payments or publish events
 - Event emission and execution happen asynchronously
 - Worker Lambda:
-  - Consumes messages from SQS
+  - Triggered only by SQS
+  - Consumes EventBridge-shaped events
   - Executes payment logic
   - Transitions payment to SUCCESS or FAILED
-  - Commits terminal state before emitting events
+  - Commits terminal state before emitting outcome events
 - Worker failures trigger automatic retries via SQS
+- No async coroutine is ever returned directly to Lambda runtime
 - Payment correctness is never affected by retries or failures
 
 
@@ -202,7 +209,7 @@ Cloud & Infrastructure:
 - API Gateway (HTTP API)
 - Amazon EventBridge
 - Amazon SQS
-- Docker
+- Docker (separate images per Lambda)
 - Terraform (IaC)
 
 Observability:
@@ -239,19 +246,22 @@ Behavior:
 DEPLOYMENT STATUS
 ====================================================
 
-Completed:
+Completed (Phase 1.1 + 1.2):
 - Split Lambda images (API / Worker)
 - Separate Dockerfiles for API and Worker
-- Separate Lambda handlers
+- Correct CMD per image
+- API Lambda uses Mangum handler only
+- Worker Lambda uses SQS handler only
+- No async coroutine returned to Lambda runtime
 - Terraform-managed AWS infrastructure
-- End-to-end API → DB → EventBridge → SQS → Worker flow
-- Verified payment lifecycle in AWS
+- End-to-end API → DB → EventBridge → SQS → Worker flow verified in AWS
 
 Next Phase:
-- Lambda handler hardening
-- Remove async coroutine returns
-- Correct CMD per Docker image
-- Worker response handling
+- Remove DB schema creation from startup
+- Introduce Alembic migrations
+- Harden IAM permissions
+- Redis-backed idempotency
+- DLQ monitoring and replay tooling
 
 
 ====================================================

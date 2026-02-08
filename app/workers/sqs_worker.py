@@ -1,13 +1,17 @@
 import json
+import asyncio
 from typing import Any, Dict
 
 from app.core.logging import logger
 from app.workers.notification_worker import process_notification
 
-# ==========================================================
-# SQS → Lambda handler
-# ==========================================================
-async def handler(event: Dict[str, Any], context):
+print("🔥🔥 WORKER IMAGE VERSION: 2026-02-08-SQS-HANDLER-LAMBDA-SAFE 🔥🔥")
+
+
+def handler(event: Dict[str, Any], context):
+    """
+    Lambda entrypoint (MUST be sync).
+    """
     records = event.get("Records", [])
 
     logger.info(
@@ -17,29 +21,21 @@ async def handler(event: Dict[str, Any], context):
 
     for record in records:
         try:
-            # SQS body is always a string
             body = json.loads(record["body"])
 
-            # EventBridge envelope
             event_type = body.get("detail-type")
             detail = body.get("detail", {})
 
             logger.info(
                 "SQS_EVENT_RECEIVED",
-                extra={
-                    "event_type": event_type,
-                    "detail": detail,
-                },
+                extra={"event_type": event_type},
             )
 
-            # -------------------------
-            # Route by event type
-            # -------------------------
             if event_type == "payment.success":
-                await process_notification("payment.success", detail)
+                asyncio.run(process_notification("payment.success", detail))
 
             elif event_type == "payment.failed":
-                await process_notification("payment.failed", detail)
+                asyncio.run(process_notification("payment.failed", detail))
 
             else:
                 logger.warning(
@@ -48,13 +44,11 @@ async def handler(event: Dict[str, Any], context):
                 )
 
         except Exception as exc:
-            # 🔥 IMPORTANT:
-            # Raising here triggers SQS retry / DLQ
             logger.exception(
                 "SQS_EVENT_PROCESSING_FAILED",
                 extra={"error": str(exc)},
             )
+            # 🔥 Triggers retry / DLQ
             raise
 
-    # Lambda requires JSON-serializable return
     return {"status": "ok"}
