@@ -1,3 +1,4 @@
-alembic==1.18.3
-sqlalchemy
-psycopg2-binary
+alembic==1.12.1
+SQLAlchemy==2.0.25
+psycopg2-binary==2.9.9
+
