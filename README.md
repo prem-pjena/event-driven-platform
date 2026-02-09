@@ -1,14 +1,14 @@
 # Event-Driven Transaction & Notification Platform
 
-A production-grade backend system inspired by Razorpay- and Amazon-style event-driven architectures, built to demonstrate correctness-first backend engineering, asynchronous processing, idempotency, and cloud-native execution using AWS.
+A production-grade backend system inspired by Razorpay- and Amazon-style event-driven architectures, built to demonstrate correctness-first backend engineering, asynchronous execution, idempotency, and cloud-native design using AWS-managed primitives.
 
 The system is intentionally designed so that client-facing APIs remain fast, deterministic, and retry-safe, while all execution side effects (payments, notifications, analytics) are handled asynchronously and independently via background workers.
 
-This repository reflects a real-world, incremental build of a distributed backend system, with explicit separation between completed components and planned system design upgrades.
+This repository reflects a real-world, incremental build of a distributed backend system. Each component was added only after the previous layer was made correct, observable, and failure-safe.
 
 
 ====================================================
-SYSTEM ARCHITECTURE (CURRENT – IMPLEMENTED)
+SYSTEM ARCHITECTURE (CURRENT – IMPLEMENTED & VERIFIED)
 ====================================================
 
 Client
@@ -27,11 +27,11 @@ PostgreSQL (RDS, Private Subnet)
   |
   |  Domain Event
   v
-EventBridge
+Amazon EventBridge (Custom Bus)
   |
   |  Fan-out
   v
-SQS Queue
+Amazon SQS Queue
   |
   |  Event Source Mapping
   v
@@ -43,11 +43,11 @@ Payment Gateway / Notifications
 
 
 Key Property:
-Client latency is fully isolated from payment execution and downstream side effects.
+Client latency is fully isolated from payment execution and all downstream side effects.
 
 
 ====================================================
-SEQUENCE DIAGRAM — PAYMENT CREATION (SYNC PATH)
+SEQUENCE — PAYMENT CREATION (SYNCHRONOUS PATH)
 ====================================================
 
 Client           API Lambda            PostgreSQL
@@ -65,14 +65,15 @@ Client           API Lambda            PostgreSQL
 
 
 Properties:
-- No external calls in API path
-- Deterministic and retry-safe
-- Idempotency guaranteed by request key + DB constraints
+- No external calls in API execution path
+- Deterministic behavior
+- Retry-safe via Idempotency-Key + DB constraints
 - API Lambda uses Mangum handler only (Lambda-safe)
+- API returns immediately after persistence
 
 
 ====================================================
-SEQUENCE DIAGRAM — ASYNCHRONOUS EXECUTION (WORKER)
+SEQUENCE — ASYNCHRONOUS EXECUTION (WORKER PATH)
 ====================================================
 
 PostgreSQL     EventBridge        SQS Queue        Worker Lambda
@@ -92,9 +93,9 @@ PostgreSQL     EventBridge        SQS Queue        Worker Lambda
 
 Properties:
 - At-least-once delivery via SQS
-- Effectively-once processing via state checks
+- Effectively-once processing via payment state checks
 - Terminal state committed before emitting outcome events
-- Worker Lambda uses SQS handler only (no HTTP / Mangum)
+- Worker Lambda is triggered only by SQS (no HTTP)
 
 
 ====================================================
@@ -121,7 +122,8 @@ Message retried automatically
 Guarantees:
 - No double charging
 - No inconsistent payment state
-- Retries are safe, bounded, and deterministic
+- Retries are bounded and deterministic
+- Poison messages handled via DLQ
 
 
 ====================================================
@@ -150,28 +152,29 @@ Guarantees:
 
 
 ====================================================
-CORE CAPABILITIES (IMPLEMENTED UP TO PHASE 1.3)
+CORE CAPABILITIES (IMPLEMENTED & VERIFIED)
 ====================================================
 
 - Asynchronous, non-blocking API design using FastAPI
 - Idempotent payment creation enforced via Idempotency-Key + DB constraints
-- Clear separation between API intent handling and execution logic
+- Strict separation between API intent handling and execution logic
 - Background payment processing using SQS-triggered worker Lambda
 - Retry-safe worker execution with terminal state persistence
 - Event-driven architecture using EventBridge + SQS fan-out
-- Effectively-once semantics on top of at-least-once delivery
-- Failure isolation between API, payments, and downstream consumers
+- Effectively-once semantics built on top of at-least-once delivery
+- Failure isolation between API, workers, and downstream consumers
 - Infrastructure as Code using Terraform
 - Fully containerized Lambdas using separate Docker images
 - Clean Lambda handler separation (API vs Worker)
 - Lambda-safe async execution (single event loop per invocation)
 - Async SQLAlchemy usage without cross-loop contamination
 - Explicit engine lifecycle management per worker invocation
-- End-to-end event flow verified in AWS (no mocks)
+- Schema-tolerant EventBridge → SQS consumer design
+- End-to-end event flow verified in real AWS (no mocks)
 
 
 ====================================================
-CURRENT SYSTEM BEHAVIOR (VERIFIED END-TO-END)
+CURRENT SYSTEM BEHAVIOR (END-TO-END VERIFIED)
 ====================================================
 
 - Clients call POST /payments
@@ -182,13 +185,13 @@ CURRENT SYSTEM BEHAVIOR (VERIFIED END-TO-END)
   - Persists payment with status = PENDING
   - Returns response immediately (HTTP 201)
 - Duplicate requests return the original persisted payment
-- API Lambda does NOT execute payments or publish events
-- Event emission and execution happen asynchronously
-- EventBridge successfully publishes domain events
+- API Lambda does NOT execute payments or publish outcome events
+- Domain events are emitted asynchronously
+- EventBridge successfully routes events
 - Events are delivered to SQS and consumed by worker Lambda
 - Worker Lambda:
   - Triggered only by SQS
-  - Consumes EventBridge-shaped events
+  - Consumes EventBridge-shaped messages
   - Executes payment logic
   - Transitions payment to SUCCESS or FAILED
   - Commits terminal state before emitting outcome events
@@ -215,7 +218,7 @@ Cloud & Infrastructure:
 - Amazon EventBridge
 - Amazon SQS
 - Docker (separate images per Lambda)
-- Terraform (IaC)
+- Terraform (Infrastructure as Code)
 
 Observability:
 - Structured logging
@@ -224,7 +227,7 @@ Observability:
 
 
 ====================================================
-API EXAMPLE (WORKING)
+API EXAMPLE
 ====================================================
 
 POST /payments
@@ -248,28 +251,79 @@ Behavior:
 
 
 ====================================================
+PROJECT STRUCTURE
+====================================================
+
+tree
+.
+├── alembic
+│   ├── env.py
+│   ├── versions
+│   └── script.py.mako
+├── app
+│   ├── api
+│   │   └── routes
+│   │       ├── payments.py
+│   │       └── notifications.py
+│   ├── core
+│   │   ├── config.py
+│   │   ├── logging.py
+│   │   └── security.py
+│   ├── events
+│   │   └── payment_events.py
+│   ├── services
+│   │   ├── event_publisher.py
+│   │   ├── fake_gateway.py
+│   │   └── payment_service.py
+│   ├── shared
+│   │   ├── models.py
+│   │   └── schemas.py
+│   └── workers
+│       ├── payment_worker.py
+│       ├── sqs_worker.py
+│       └── db
+│           └── session.py
+├── infra
+│   └── terraform
+│       ├── apigateway.tf
+│       ├── eventbridge.tf
+│       ├── sqs.tf
+│       ├── lambda_api.tf
+│       ├── lambda_worker.tf
+│       ├── iam.tf
+│       └── rds.tf
+├── Dockerfile.api
+├── Dockerfile.worker
+├── docker-compose.yml
+├── requirements
+│   ├── prod.txt
+│   ├── dev.txt
+│   └── migrations.txt
+├── locustfile.py
+└── README.md
+
+
+====================================================
 DEPLOYMENT STATUS
 ====================================================
 
-Completed (Phase 1.1 + 1.2 + 1.3):
+Completed:
 - Split Lambda images (API / Worker)
-- Separate Dockerfiles for API and Worker
+- Separate Dockerfiles per Lambda
 - Correct CMD per image
 - API Lambda uses Mangum handler only
 - Worker Lambda uses SQS handler only
-- No async coroutine returned to Lambda runtime
 - Async SQLAlchemy usage is Lambda-safe
-- EventBridge → SQS → Worker integration verified
-- End-to-end API → DB → EventBridge → SQS → Worker flow verified in AWS
-- Payment status transitions verified via real AWS execution
-- Retry behavior validated under worker failure scenarios
+- EventBridge → SQS → Worker flow verified
+- Payment retries validated under failure scenarios
+- End-to-end execution verified in AWS
 
-Next Phase:
-- Remove DB schema creation from startup
-- Introduce Alembic migrations
-- Harden IAM permissions
+Planned (Next Phase):
+- Alembic-based schema migrations
 - Redis-backed idempotency
+- Hardened IAM permissions
 - DLQ monitoring and replay tooling
+- Additional downstream consumers (notifications, analytics)
 
 
 ====================================================

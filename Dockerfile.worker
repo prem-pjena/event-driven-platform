@@ -7,5 +7,5 @@ RUN pip install --no-cache-dir -r requirements/prod.txt
 
 COPY app ./app
 
-# Worker Lambda → SQS handler ONLY
-CMD ["app.workers.sqs_worker.handler"]
+# ✅ CORRECT: points to the file that ACTUALLY exists
+CMD ["app.workers.payment_worker.handler"]

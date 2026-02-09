@@ -1,23 +1,19 @@
 import uuid
 from fastapi import FastAPI, Request
 from mangum import Mangum
-from sqlalchemy import text
 
 from app.api.routes import payments, notifications
 from app.core.logging import logger
-from app.db.session import engine
-from app.db.models import Base
 
 # --------------------------------------------------
 # FastAPI app
 # --------------------------------------------------
-# 🔥 CRITICAL FIX: disable slash redirect for API Gateway
 app = FastAPI(
     title="Event Driven Platform",
     redirect_slashes=False,
 )
 
-print("🔥🔥 API IMAGE VERSION: 2026-02-07-FINAL-SLASH-FIX 🔥🔥")
+print("🔥🔥 API IMAGE VERSION: 2026-02-07-FINAL-API-CLEAN 🔥🔥")
 
 # --------------------------------------------------
 # Middleware: Request ID
@@ -54,18 +50,11 @@ async def health():
     return {"status": "ok"}
 
 # --------------------------------------------------
-# Startup (SAFE for Lambda)
+# Startup (NO DB WORK IN API)
 # --------------------------------------------------
 @app.on_event("startup")
 async def startup():
     logger.info("APPLICATION_STARTUP")
-
-    async with engine.begin() as conn:
-        # ✅ force DB connection check
-        await conn.execute(text("SELECT 1"))
-
-        # ✅ safe for Lambda (no migrations)
-        await conn.run_sync(Base.metadata.create_all)
 
 # --------------------------------------------------
 # Lambda adapter (MUST be last)

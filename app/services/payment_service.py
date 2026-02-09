@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.db.models import Payment, PaymentStatus
+from app.shared.models import Payment, PaymentStatus
+
 from uuid import UUID
 
 async def create_payment(

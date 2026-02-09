@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, BotoCoreError
 
 logger = logging.getLogger(__name__)
 
@@ -12,41 +12,58 @@ logger = logging.getLogger(__name__)
 USE_AWS_EVENTS = os.getenv("USE_AWS_EVENTS", "false").lower() == "true"
 EVENT_BUS_NAME = os.getenv("EVENT_BUS_NAME", "default")
 
-_eventbridge_client = None
-
 
 def get_eventbridge_client():
-    global _eventbridge_client
-    if _eventbridge_client is None:
-        _eventbridge_client = boto3.client("events")
-    return _eventbridge_client
+    """
+    Create EventBridge client lazily.
+    Safe for Lambda + VPC.
+    """
+    return boto3.client("events")
 
 
 # --------------------------------------------------
-# Event Publisher (SYNC BY DESIGN ✅)
+# Event Publisher (API-SAFE + CONTRACT-SAFE ✅)
 # --------------------------------------------------
 def publish_event(event_type: str, payload: dict) -> None:
     """
-    Best-effort domain event publisher.
+    🔒 API-SAFE domain event publisher
 
-    Design guarantees:
-    - SYNC function (safe with boto3)
-    - Never awaited
-    - Non-blocking in async flows
-    - Raises only on hard AWS failure
+    Guarantees:
+    - NEVER raises
+    - NEVER blocks API response
+    - Enforces event contract (payment_id)
+    - Best-effort delivery
     """
 
     logger.info(
-        "EVENT_PUBLISH_ATTEMPT",
+        "EVENT_PUBLISH_ENTERED",
         extra={
             "event_type": event_type,
-            "aws_enabled": USE_AWS_EVENTS,
+            "bus": EVENT_BUS_NAME,
+            "enabled": USE_AWS_EVENTS,
         },
     )
 
-    # Local / dev / tests
+    # --------------------------------------------------
+    # HARD CONTRACT CHECK (CRITICAL FIX 🔥)
+    # --------------------------------------------------
+    payment_id = payload.get("payment_id")
+
+    if not payment_id:
+        logger.error(
+            "EVENT_PUBLISH_DROPPED_MISSING_PAYMENT_ID",
+            extra={
+                "event_type": event_type,
+                "payload": payload,
+            },
+        )
+        return  # 🔒 swallow by design
+
     if not USE_AWS_EVENTS:
-        logger.info("EVENT_PUBLISH_SKIPPED_LOCAL")
+        logger.info(
+            "EVENT_PUBLISH_SKIPPED_LOCAL",
+            extra={"event_type": event_type},
+        )
         return
 
     try:
@@ -64,16 +81,41 @@ def publish_event(event_type: str, payload: dict) -> None:
         )
 
         if response.get("FailedEntryCount", 0) > 0:
-            raise RuntimeError(f"EventBridge failure: {response}")
+            logger.error(
+                "EVENT_PUBLISH_FAILED",
+                extra={
+                    "event_type": event_type,
+                    "response": response,
+                },
+            )
+            return
 
         logger.info(
             "EVENT_PUBLISH_SUCCESS",
-            extra={"event_type": event_type},
+            extra={
+                "event_type": event_type,
+                "payment_id": payment_id,
+            },
         )
 
-    except ClientError as exc:
+    except (ClientError, BotoCoreError) as exc:
         logger.error(
-            "EVENT_PUBLISH_ERROR",
-            extra={"error": str(exc)},
+            "EVENT_PUBLISH_AWS_EXCEPTION_SWALLOWED",
+            extra={
+                "event_type": event_type,
+                "payment_id": payment_id,
+                "error": str(exc),
+            },
         )
-        raise
+
+    except Exception as exc:
+        logger.error(
+            "EVENT_PUBLISH_UNKNOWN_EXCEPTION_SWALLOWED",
+            extra={
+                "event_type": event_type,
+                "payment_id": payment_id,
+                "error": str(exc),
+            },
+        )
+
+    return

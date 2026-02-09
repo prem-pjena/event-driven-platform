@@ -1,8 +1,9 @@
 from sqlalchemy.future import select
 from datetime import date
 
-from app.db.session import create_session_factory
-from app.db.models import Payment, DailyPaymentAnalytics
+from app.workers.db.session import create_session_factory
+from app.shared.models import Payment, DailyPaymentAnalytics
+
 
 
 async def run_daily_analytics():
