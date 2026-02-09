@@ -43,4 +43,3 @@ def run_migrations_online():
 
 
 run_migrations_online()
-

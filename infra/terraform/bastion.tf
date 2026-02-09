@@ -1,9 +1,10 @@
 ########################################
 # Bastion EC2 (for Alembic / Ops)
 ########################################
+
 resource "aws_key_pair" "bastion_key" {
   key_name   = "${var.project_name}-bastion-key"
-  public_key = file("~/.ssh/id_rsa.pub")
+  public_key = file("${path.module}/../keys/event-platform-bastion.pub")
 }
 
 resource "aws_instance" "bastion" {
@@ -12,8 +13,9 @@ resource "aws_instance" "bastion" {
 
   subnet_id = aws_subnet.subnet_a.id
 
+  # 🔥 IMPORTANT: Bastion gets ITS OWN SG
   vpc_security_group_ids = [
-    aws_security_group.lambda_db_sg.id
+    aws_security_group.bastion_sg.id
   ]
 
   key_name = aws_key_pair.bastion_key.key_name
