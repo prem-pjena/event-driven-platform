@@ -8,9 +8,27 @@ from app.shared.models import Payment, PaymentStatus
 from app.services.fake_gateway import charge, PaymentGatewayError
 from app.services.event_publisher import publish_event
 from app.core.logging import logger
+from app.core.locks import acquire_lock, release_lock
 
 
-print("🔥🔥 WORKER IMAGE VERSION: 2026-02-09-FINAL-SCHEMA-TOLERANT 🔥🔥")
+print("🔥🔥 WORKER IMAGE VERSION: 2026-02-10-UUID-GUARD-FINAL 🔥🔥")
+
+
+# ==================================================
+# Helpers
+# ==================================================
+def _parse_uuid(value: str) -> str | None:
+    """
+    Validates and normalizes UUID input.
+
+    Returns:
+        str(UUID) if valid
+        None if invalid
+    """
+    try:
+        return str(uuid.UUID(value))
+    except Exception:
+        return None
 
 
 # ==================================================
@@ -21,10 +39,14 @@ async def process_payment(payment_id: str):
     Async, Lambda-safe payment processor.
     """
 
-    # 🔥 Import inside function (Lambda-safe)
     from app.workers.db.session import create_session_factory
 
     engine, SessionLocal = create_session_factory()
+
+    lock_token = await acquire_lock(f"payment:{payment_id}")
+    if not lock_token:
+        logger.info("PAYMENT_LOCK_ALREADY_HELD", extra={"payment_id": payment_id})
+        return
 
     try:
         async with SessionLocal() as session:
@@ -64,7 +86,7 @@ async def process_payment(payment_id: str):
                     },
                 )
 
-                publish_event(
+                await publish_event(
                     "payment.success",
                     {
                         "event_id": str(uuid.uuid4()),
@@ -88,7 +110,7 @@ async def process_payment(payment_id: str):
                     extra={"payment_id": str(payment.id)},
                 )
 
-                publish_event(
+                await publish_event(
                     "payment.failed",
                     {
                         "event_id": str(uuid.uuid4()),
@@ -101,86 +123,61 @@ async def process_payment(payment_id: str):
                 )
 
     finally:
+        await release_lock(f"payment:{payment_id}", lock_token)
         await engine.dispose()
 
 
 # ==================================================
-# SQS processing (SCHEMA-TOLERANT ✅)
+# SQS processing
 # ==================================================
 async def handle_record(record: dict):
-    """
-    Handles ONE SQS record.
-    Accepts ALL EventBridge → SQS shapes (raw + transformed).
-    """
-
     try:
         body = json.loads(record["body"])
     except Exception:
         logger.warning("SQS_MESSAGE_INVALID_JSON", extra={"record": record})
         return
 
-    payment_id = None
+    raw_payment_id = None
 
-    # --------------------------------------------------
-    # CASE 1: input_transformer → direct payload
-    # --------------------------------------------------
     if isinstance(body, dict):
-        payment_id = body.get("payment_id")
+        raw_payment_id = body.get("payment_id")
 
-    # --------------------------------------------------
-    # CASE 2: raw EventBridge envelope
-    # --------------------------------------------------
-    if not payment_id and isinstance(body, dict):
+    if not raw_payment_id and isinstance(body, dict):
         detail = body.get("detail")
-
-        # EventBridge often sends detail as STRING
         if isinstance(detail, str):
             try:
                 detail = json.loads(detail)
             except Exception:
-                logger.warning(
-                    "SQS_DETAIL_JSON_PARSE_FAILED",
-                    extra={"detail": detail},
-                )
                 return
 
         if isinstance(detail, dict):
-            payment_id = (
-                detail.get("payment_id")
-                or detail.get("id")
-                or detail.get("payment", {}).get("id")
-            )
+            raw_payment_id = detail.get("payment_id")
 
-    if not payment_id:
-        logger.warning(
-            "SQS_MESSAGE_MISSING_PAYMENT_ID",
-            extra={"body": body},
-        )
+    if not raw_payment_id:
+        logger.warning("SQS_MESSAGE_MISSING_PAYMENT_ID", extra={"body": body})
         return
 
-    await process_payment(str(payment_id))
+    payment_id = _parse_uuid(str(raw_payment_id))
+    if not payment_id:
+        logger.error(
+            "SQS_MESSAGE_INVALID_PAYMENT_ID",
+            extra={"payment_id": raw_payment_id},
+        )
+        # ACK the message – poison payload
+        return
+
+    await process_payment(payment_id)
 
 
 async def process_event(event: dict):
-    """
-    Processes SQS batch WITHOUT failing the whole batch.
-    """
     for record in event.get("Records", []):
         try:
             await handle_record(record)
-        except Exception as exc:
-            logger.exception(
-                "SQS_RECORD_PROCESSING_FAILED",
-                extra={
-                    "error": str(exc),
-                    "record": record,
-                },
-            )
+        except Exception:
+            # Catch-all to avoid SQS retry storms
+            logger.exception("SQS_RECORD_PROCESSING_FAILED")
 
 
-# ==================================================
-# Lambda entrypoint (IMAGE-SAFE)
-# ==================================================
 def handler(event, context):
     try:
         loop = asyncio.get_event_loop()

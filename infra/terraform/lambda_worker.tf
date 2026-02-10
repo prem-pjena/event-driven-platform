@@ -14,7 +14,11 @@ resource "aws_lambda_function" "payment_worker" {
 
   environment {
     variables = {
-      DATABASE_URL = "postgresql+asyncpg://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:5432/${var.db_name}"
+      # 🔥 EXACTLY what asyncpg expects
+      DATABASE_URL = "postgresql+asyncpg://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:5432/${var.db_name}?ssl=disable"
+
+
+      REDIS_URL = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:6379"
     }
   }
 }

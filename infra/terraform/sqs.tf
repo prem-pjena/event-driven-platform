@@ -16,7 +16,7 @@ resource "aws_sqs_queue" "payment_queue" {
 }
 
 ########################################
-# EventBridge → SQS Target (FIXED)
+# EventBridge → SQS Target (CORRECT)
 ########################################
 resource "aws_cloudwatch_event_target" "payment_to_sqs" {
   rule           = aws_cloudwatch_event_rule.payment_events.name
@@ -28,9 +28,10 @@ resource "aws_cloudwatch_event_target" "payment_to_sqs" {
       payment_id = "$.detail.payment_id"
     }
 
+    # 🔥 QUOTES ARE MANDATORY 🔥
     input_template = <<EOF
 {
-  "payment_id": <payment_id>
+  "payment_id": "<payment_id>"
 }
 EOF
   }

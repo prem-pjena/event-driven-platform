@@ -1,118 +1,142 @@
-# Event-Driven Transaction & Notification Platform
+# Event-Driven Transaction, Analytics & Notification Platform
 
-A production-grade backend system inspired by Razorpay- and Amazon-style event-driven architectures, built to demonstrate correctness-first backend engineering, asynchronous execution, idempotency, and cloud-native design using AWS-managed primitives.
+A production-grade, correctness-first backend system inspired by real-world architectures used at Amazon, Razorpay, Stripe, and Uber. This project demonstrates how to design and operate a distributed, event-driven backend where client-facing APIs are deterministic, retry-safe, and latency-isolated, while all side effects (payments, analytics, notifications) are executed asynchronously and independently.
 
-The system is intentionally designed so that client-facing APIs remain fast, deterministic, and retry-safe, while all execution side effects (payments, notifications, analytics) are handled asynchronously and independently via background workers.
-
-This repository reflects a real-world, incremental build of a distributed backend system. Each component was added only after the previous layer was made correct, observable, and failure-safe.
+The system is intentionally designed to reflect how large-scale backend systems evolve in production. Each layer was added only after the previous layer was made correct, observable, and failure-safe. The emphasis is on system design, idempotency, failure handling, and operational correctness rather than superficial feature count.
 
 
-SYSTEM ARCHITECTURE (IMPLEMENTED & VERIFIED)
+====================================================================
+SYSTEM ARCHITECTURE (IMPLEMENTED & VERIFIED IN AWS)
+====================================================================
 
 Client
   |
-  |  HTTPS (REST)
+  | HTTPS (REST)
   v
 API Gateway (HTTP API)
   |
-  |  Lambda Invoke
+  | Lambda Invoke
   v
 API Lambda (FastAPI + Mangum)
   |
-  |  Domain Event
+  | Domain Events (Intent Only)
   v
-Amazon EventBridge (Custom Bus)
+Amazon EventBridge (Custom Event Bus)
   |
-  |  Fan-out
+  | Fan-out
   v
 Amazon SQS Queue
   |
-  |  Event Source Mapping
+  | Event Source Mapping
   v
-Worker Lambda
+Worker Lambda (Async, Non-HTTP)
   |
-  |  Database Updates / External Calls
+  | Redis (Locks, Idempotency, Rate Limits)
+  | Database Writes / External Calls
   v
 PostgreSQL (RDS, Private Subnet)
   |
   v
 Outcome Events (EventBridge)
 
+Key Architectural Property:
+Client latency is fully isolated from execution. API correctness is never impacted by worker failures, retries, or downstream outages.
 
-Key Property:
-Client latency is fully isolated from payment execution and all downstream side effects.
+
+====================================================================
+DESIGN GOALS
+====================================================================
+
+- Deterministic, retry-safe APIs
+- No side effects in synchronous request path
+- Asynchronous execution for resilience and scale
+- Effectively-once semantics over at-least-once delivery
+- Explicit failure handling at every boundary
+- Cloud-native primitives over custom infrastructure
+- Infrastructure defined as code
+- Production-grade patterns suitable for FAANG-style systems
 
 
-SEQUENCE — PAYMENT CREATION (SYNCHRONOUS PATH)
+====================================================================
+SYNCHRONOUS FLOW — PAYMENT CREATION (API PATH)
+====================================================================
 
-Client           API Lambda
-  |                  |
-  | POST /payments   |
-  |----------------->|
-  |                  | Validate request
-  |                  | Require Idempotency-Key
-  |                  | Emit domain event
-  |                  |
-  | 202 Accepted     |
-  |<-----------------|
-
+Client                 API Lambda
+  |                        |
+  | POST /payments         |
+  |----------------------->|
+  |                        | Validate request
+  |                        | Require Idempotency-Key
+  |                        | Persist intent
+  |                        | Emit domain event
+  |                        |
+  | HTTP 202 Accepted      |
+  |<-----------------------|
 
 Properties:
 - No external calls in API execution path
-- Deterministic behavior
-- Retry-safe request handling
+- No payment execution in API
+- Idempotency enforced at API boundary
+- Deterministic behavior under retries
 - API Lambda uses Mangum handler only (Lambda-safe)
 - API returns immediately after intent validation
 
 
-SEQUENCE — ASYNCHRONOUS EXECUTION (WORKER PATH)
+====================================================================
+ASYNCHRONOUS FLOW — PAYMENT EXECUTION (WORKER PATH)
+====================================================================
 
-EventBridge        SQS Queue        Worker Lambda        PostgreSQL
-     |                |                  |                  |
-     | Emit event     |                  |                  |
-     |--------------->|                  |                  |
-     |                | Deliver message  |                  |
-     |                |----------------->|                  |
-     |                |                  | Process payment  |
-     |                |                  | Update DB        |
-     |                |                  | Emit outcome     |
-     |                |                  |-----------------> EventBridge
-
+EventBridge        SQS Queue        Worker Lambda        Redis        PostgreSQL
+     |                |                  |                |                |
+     | Emit event     |                  |                |                |
+     |--------------->|                  |                |                |
+     |                | Deliver message  |                |                |
+     |                |----------------->|                |                |
+     |                |                  | Acquire lock   |                |
+     |                |                  |--------------->|                |
+     |                |                  | Execute logic  |                |
+     |                |                  | Update DB      |--------------->|
+     |                |                  | Emit outcome   |                |
+     |                |                  |-------------------------------> EventBridge
 
 Properties:
 - At-least-once delivery via SQS
-- Effectively-once processing via payment state checks
+- Effectively-once execution via Redis locks + DB state checks
 - Terminal state committed before emitting outcome events
-- Worker Lambda is triggered only by SQS (no HTTP)
+- Worker Lambda has no HTTP surface
+- Retries are safe and deterministic
 
 
+====================================================================
 FAILURE SCENARIO — WORKER FAILURE (RETRY SAFE)
+====================================================================
 
 Worker Lambda
      |
-     | Gateway timeout / exception
+     | Exception / Timeout
      v
 Exception thrown
      |
      v
-SQS does NOT delete message
+SQS message NOT deleted
      |
      v
-Message retried automatically
+Automatic retry
      |
      +--> Payment still PENDING → retry allowed
      |
      +--> Payment terminal → safe no-op
 
-
 Guarantees:
 - No double charging
-- No inconsistent payment state
-- Retries are deterministic and bounded
-- Poison messages isolated via DLQ
+- No partial state commits
+- Deterministic retries
+- Poison messages isolated using DLQ
 
 
+====================================================================
 FAILURE SCENARIO — DUPLICATE CLIENT REQUEST
+====================================================================
 
 Client retries request
      |
@@ -126,60 +150,68 @@ API Lambda
 Original request re-validated
      |
      v
-Same domain event semantics applied
-
+No duplicated execution
 
 Guarantees:
-- No duplicated execution side effects
-- Safe client retries
-- Client-facing API remains deterministic
+- Client retries are always safe
+- API behavior is deterministic
+- Downstream execution never duplicated
 
 
+====================================================================
+REDIS — DISTRIBUTED COORDINATION LAYER (PRODUCTION-GRADE)
+====================================================================
+
+Redis is used strictly as a distributed coordination and correctness layer, never as a primary datastore. The system remains correct even if Redis becomes unavailable.
+
+Infrastructure:
+- AWS ElastiCache Redis cluster
+- Deployed in private subnets
+- Security group allows access only from Lambda
+- Endpoint stored in AWS Secrets Manager
+- No public access
+
+Application Integration:
+- Async Redis client
+- Redis-backed idempotency keys with TTL
+- Redis-based distributed locks using SET NX EX
+- Ownership tokens prevent accidental lock release
+- TTLs prevent deadlocks
+- Graceful fallback to database if Redis is unavailable
+
+Advanced Redis Usage:
+- Distributed locking for worker execution
+- Idempotency enforcement across retries
+- Token-bucket rate limiting primitives
+- Read-model caching hooks (prepared for scale)
+- Redis failures never compromise correctness (fail-open design)
+
+
+====================================================================
 CORE CAPABILITIES (IMPLEMENTED & VERIFIED)
+====================================================================
 
 - Asynchronous, non-blocking API design using FastAPI
-- Idempotency-first API contract using Idempotency-Key
-- Strict separation between API intent handling and execution logic
-- Background payment processing using SQS-triggered worker Lambda
-- Retry-safe worker execution with terminal state persistence
-- Event-driven architecture using EventBridge + SQS fan-out
+- Idempotency-first API contract
+- Strict separation of intent handling and execution
+- Event-driven architecture using EventBridge + SQS
+- Retry-safe background workers
+- Distributed coordination using Redis
 - Effectively-once semantics built on top of at-least-once delivery
-- Failure isolation between API, workers, and downstream consumers
+- Failure isolation across API, workers, and consumers
 - Infrastructure as Code using Terraform
-- Fully containerized Lambdas using separate Docker images
-- Clean Lambda handler separation (API vs Worker)
+- Fully containerized Lambdas with separate images
+- Clean handler separation (API vs Worker)
 - Lambda-safe async execution (single event loop per invocation)
-- Async SQLAlchemy usage without cross-loop contamination
+- Async SQLAlchemy without cross-loop contamination
 - Explicit engine lifecycle management per worker invocation
-- Schema-tolerant EventBridge → SQS consumer design
-- End-to-end event flow verified in real AWS (no mocks)
+- Schema-tolerant event consumption
+- End-to-end execution verified in real AWS
 
 
-CURRENT SYSTEM BEHAVIOR (END-TO-END VERIFIED)
-
-- Clients call POST /payments
-- API Lambda:
-  - Uses Mangum handler only
-  - Validates request
-  - Requires Idempotency-Key
-  - Emits domain event
-  - Returns immediately (HTTP 202)
-- API Lambda does NOT execute payments or update database state
-- Domain events are emitted asynchronously
-- EventBridge successfully routes events
-- Events are delivered to SQS and consumed by worker Lambda
-- Worker Lambda:
-  - Triggered only by SQS
-  - Consumes EventBridge-shaped messages
-  - Executes payment logic
-  - Transitions payment to SUCCESS or FAILED
-  - Commits terminal state before emitting outcome events
-- Worker failures trigger automatic retries via SQS
-- No async coroutine is ever returned directly to Lambda runtime
-- Payment correctness is never affected by retries or failures
-
-
+====================================================================
 TECH STACK
+====================================================================
 
 Backend:
 - FastAPI (async)
@@ -188,117 +220,85 @@ Backend:
 
 Data:
 - PostgreSQL (AWS RDS)
+- Redis (AWS ElastiCache)
 
 Cloud & Infrastructure:
-- AWS Lambda (API + Worker split)
+- AWS Lambda (API + Worker)
 - API Gateway (HTTP API)
 - Amazon EventBridge
 - Amazon SQS
-- Docker (separate images per Lambda)
+- Docker (multi-image setup)
 - Terraform (Infrastructure as Code)
 
 Observability:
 - Structured logging
-- Correlation-friendly log context
+- Correlation-friendly logs
 - CloudWatch Logs
 
 
-API EXAMPLE
+====================================================================
+PROJECT STRUCTURE (CURRENT)
+====================================================================
 
-POST /payments
-
-Headers:
-Idempotency-Key: <uuid>
-
-Body:
-{
-  "user_id": "uuid",
-  "amount": 500,
-  "currency": "INR"
-}
-
-Behavior:
-- API responds immediately
-- Execution handled asynchronously by worker
-- Client retries are safe
-
-
-PROJECT STRUCTURE
-
-tree
 .
 ├── alembic
-│   ├── env.py
-│   └── versions
 ├── app
 │   ├── api
 │   │   └── routes
-│   │       ├── payments.py
-│   │       └── notifications.py
 │   ├── core
-│   │   ├── config.py
-│   │   ├── logging.py
-│   │   └── security.py
+│   │   ├── redis.py
+│   │   ├── locks.py
+│   │   ├── rate_limit.py
+│   │   └── logging.py
 │   ├── events
-│   │   └── payment_events.py
 │   ├── services
-│   │   ├── event_publisher.py
-│   │   ├── fake_gateway.py
-│   │   └── payment_service.py
 │   ├── shared
-│   │   ├── models.py
-│   │   └── schemas.py
 │   └── workers
 │       ├── payment_worker.py
+│       ├── sqs_worker.py
 │       └── db
-│           └── session.py
 ├── infra
 │   └── terraform
-│       ├── apigateway.tf
-│       ├── eventbridge.tf
-│       ├── sqs.tf
-│       ├── lambda_api.tf
-│       ├── lambda_worker.tf
-│       ├── iam.tf
-│       └── rds.tf
 ├── Dockerfile.api
 ├── Dockerfile.worker
 ├── docker-compose.yml
-├── requirements
-│   ├── prod.txt
-│   ├── dev.txt
-│   └── migrations.txt
 ├── locustfile.py
 └── README.md
 
 
+====================================================================
 DEPLOYMENT STATUS
+====================================================================
 
-Completed:
-- Split Lambda images (API / Worker)
-- Separate Dockerfiles per Lambda
-- Correct CMD per image
-- API Lambda uses Mangum handler only
-- Worker Lambda uses SQS handler only
-- Async SQLAlchemy usage is Lambda-safe
+Completed and verified in AWS:
+- API and Worker Lambdas split correctly
+- Separate Docker images per Lambda
+- Correct handlers per image
+- API Lambda uses Mangum only
+- Worker Lambda triggered only by SQS
+- Redis locking and idempotency verified
 - EventBridge → SQS → Worker flow verified
-- Payment retries validated under failure scenarios
-- Alembic migrations integrated and applied
-- Schema creation removed from application startup
-- End-to-end execution verified in AWS
+- Payment retries validated under failure
+- Alembic migrations applied safely
+- End-to-end execution verified with real AWS resources
 
 
+====================================================================
 DESIGN PRINCIPLES
+====================================================================
 
 - Correctness over convenience
 - Idempotency-first APIs
 - Asynchronous execution for resilience
 - Deterministic retries
 - Failure isolation
+- Distributed coordination via Redis
 - Cloud-native primitives
 - Infrastructure defined as code
 
 
+====================================================================
 AUTHOR NOTES
+====================================================================
 
-This project is intentionally built in phases to mirror how real backend systems evolve in production. Each capability is added only after the previous layer is made correct, observable, and resilient. The emphasis is on system design, failure handling, and operational correctness rather than superficial feature count.
+This project is intentionally built to reflect real backend engineering standards rather than tutorial shortcuts. Each architectural decision mirrors patterns used in production systems at scale. The goal is to demonstrate deep understanding of system design, idempotency, failure handling, and operational correctness expected from strong backend engineers applying for SDE-1 roles.

@@ -30,21 +30,25 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
 # --------------------------------------------------
 # EventBridge publish (API + Worker)
 # --------------------------------------------------
-resource "aws_iam_role_policy" "lambda_eventbridge_policy" {
-  name = "${var.project_name}-lambda-eventbridge"
+resource "aws_iam_role_policy" "lambda_eventbridge_publish" {
+  name = "${var.project_name}-eventbridge-publish"
   role = aws_iam_role.lambda_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["events:PutEvents"]
+        Effect = "Allow"
+        Action = [
+          "events:PutEvents"
+        ]
         Resource = aws_cloudwatch_event_bus.payments_bus.arn
       }
     ]
   })
 }
+
+
 
 # --------------------------------------------------
 # 🔥 CRITICAL FIX: SQS → Lambda Worker permissions

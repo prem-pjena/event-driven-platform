@@ -8,14 +8,30 @@ resource "aws_lambda_function" "api" {
   timeout     = 30
   memory_size = 1024
 
-  environment {
-    variables = {
-      USE_AWS_EVENTS = "true"
-      EVENT_BUS_NAME = aws_cloudwatch_event_bus.payments_bus.name
-    }
+  # 🔥 THIS IS THE FIX 🔥
+  vpc_config {
+    subnet_ids = [
+      aws_subnet.subnet_a.id,
+      aws_subnet.subnet_b.id
+    ]
+    security_group_ids = [
+      aws_security_group.lambda_db_sg.id
+    ]
   }
 
+  environment {
+  variables = {
+    DATABASE_URL = "postgresql+asyncpg://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:5432/${var.db_name}?ssl=disable"
+
+
+    REDIS_URL = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:6379"
+  }
+}
+
+
   depends_on = [
-    aws_iam_role_policy.lambda_eventbridge_policy
-  ]
+  aws_iam_role_policy.lambda_eventbridge_publish,
+  aws_iam_role_policy_attachment.lambda_vpc_access
+]
+
 }
