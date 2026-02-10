@@ -1,42 +1,25 @@
-import json
 import uuid
-import asyncio
 from datetime import datetime
 from sqlalchemy.future import select
 
 from app.shared.models import Payment, PaymentStatus
 from app.services.fake_gateway import charge, PaymentGatewayError
-from app.services.event_publisher import publish_event
 from app.core.logging import logger
 from app.core.locks import acquire_lock, release_lock
+from app.workers.db.models.outbox import OutboxEvent
+
+print("🔥🔥 WORKER IMAGE VERSION: 2026-02-10-PHASE4-OUTBOX-SAFE 🔥🔥")
 
 
-print("🔥🔥 WORKER IMAGE VERSION: 2026-02-10-UUID-GUARD-FINAL 🔥🔥")
-
-
-# ==================================================
-# Helpers
-# ==================================================
-def _parse_uuid(value: str) -> str | None:
-    """
-    Validates and normalizes UUID input.
-
-    Returns:
-        str(UUID) if valid
-        None if invalid
-    """
-    try:
-        return str(uuid.UUID(value))
-    except Exception:
-        return None
-
-
-# ==================================================
-# Core business logic
-# ==================================================
 async def process_payment(payment_id: str):
     """
-    Async, Lambda-safe payment processor.
+    Phase 4–correct payment processor.
+
+    Responsibilities:
+    - idempotent
+    - locked
+    - updates DB state
+    - writes OUTBOX events (NOT EventBridge)
     """
 
     from app.workers.db.session import create_session_factory
@@ -70,32 +53,38 @@ async def process_payment(payment_id: str):
                 return
 
             try:
+                # -----------------------------
+                # External side effect
+                # -----------------------------
                 await charge(payment.amount)
 
                 payment.status = PaymentStatus.SUCCESS
                 payment.processed_at = datetime.utcnow()
+
+                # -----------------------------
+                # OUTBOX EVENT (🔥 ATOMIC)
+                # -----------------------------
+                session.add(
+                    OutboxEvent(
+                        event_id=uuid.uuid4(),
+                        aggregate_id=payment.id,
+                        event_type="payment.success",
+                        version=1,
+                        payload={
+                            "payment_id": str(payment.id),
+                            "user_id": str(payment.user_id),
+                            "amount": payment.amount,
+                            "currency": payment.currency,
+                            "occurred_at": payment.processed_at.isoformat(),
+                        },
+                    )
+                )
+
                 await session.commit()
 
                 logger.info(
                     "PAYMENT_SUCCESS",
-                    extra={
-                        "payment_id": str(payment.id),
-                        "user_id": str(payment.user_id),
-                        "amount": payment.amount,
-                        "currency": payment.currency,
-                    },
-                )
-
-                await publish_event(
-                    "payment.success",
-                    {
-                        "event_id": str(uuid.uuid4()),
-                        "payment_id": str(payment.id),
-                        "user_id": str(payment.user_id),
-                        "amount": payment.amount,
-                        "currency": payment.currency,
-                        "occurred_at": payment.processed_at.isoformat(),
-                    },
+                    extra={"payment_id": str(payment.id)},
                 )
 
             except PaymentGatewayError:
@@ -103,6 +92,23 @@ async def process_payment(payment_id: str):
 
                 payment.status = PaymentStatus.FAILED
                 payment.processed_at = datetime.utcnow()
+
+                session.add(
+                    OutboxEvent(
+                        event_id=uuid.uuid4(),
+                        aggregate_id=payment.id,
+                        event_type="payment.failed",
+                        version=1,
+                        payload={
+                            "payment_id": str(payment.id),
+                            "user_id": str(payment.user_id),
+                            "amount": payment.amount,
+                            "currency": payment.currency,
+                            "occurred_at": payment.processed_at.isoformat(),
+                        },
+                    )
+                )
+
                 await session.commit()
 
                 logger.info(
@@ -110,80 +116,6 @@ async def process_payment(payment_id: str):
                     extra={"payment_id": str(payment.id)},
                 )
 
-                await publish_event(
-                    "payment.failed",
-                    {
-                        "event_id": str(uuid.uuid4()),
-                        "payment_id": str(payment.id),
-                        "user_id": str(payment.user_id),
-                        "amount": payment.amount,
-                        "currency": payment.currency,
-                        "occurred_at": payment.processed_at.isoformat(),
-                    },
-                )
-
     finally:
         await release_lock(f"payment:{payment_id}", lock_token)
         await engine.dispose()
-
-
-# ==================================================
-# SQS processing
-# ==================================================
-async def handle_record(record: dict):
-    try:
-        body = json.loads(record["body"])
-    except Exception:
-        logger.warning("SQS_MESSAGE_INVALID_JSON", extra={"record": record})
-        return
-
-    raw_payment_id = None
-
-    if isinstance(body, dict):
-        raw_payment_id = body.get("payment_id")
-
-    if not raw_payment_id and isinstance(body, dict):
-        detail = body.get("detail")
-        if isinstance(detail, str):
-            try:
-                detail = json.loads(detail)
-            except Exception:
-                return
-
-        if isinstance(detail, dict):
-            raw_payment_id = detail.get("payment_id")
-
-    if not raw_payment_id:
-        logger.warning("SQS_MESSAGE_MISSING_PAYMENT_ID", extra={"body": body})
-        return
-
-    payment_id = _parse_uuid(str(raw_payment_id))
-    if not payment_id:
-        logger.error(
-            "SQS_MESSAGE_INVALID_PAYMENT_ID",
-            extra={"payment_id": raw_payment_id},
-        )
-        # ACK the message – poison payload
-        return
-
-    await process_payment(payment_id)
-
-
-async def process_event(event: dict):
-    for record in event.get("Records", []):
-        try:
-            await handle_record(record)
-        except Exception:
-            # Catch-all to avoid SQS retry storms
-            logger.exception("SQS_RECORD_PROCESSING_FAILED")
-
-
-def handler(event, context):
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    loop.run_until_complete(process_event(event))
-    return {"status": "ok"}

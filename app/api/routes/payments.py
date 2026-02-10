@@ -1,58 +1,73 @@
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Depends
 from pydantic import BaseModel
-from uuid import UUID, uuid4
+from uuid import UUID
 from typing import Optional
-import logging
 
-from app.services.event_publisher import publish_event
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.workers.db.session import get_session
+from app.services.payment_service import create_payment
+from app.workers.idempotency import check_idempotency
 from app.core.rate_limit import rate_limit
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
+# -------------------------
+# Request schema
+# -------------------------
 class PaymentRequest(BaseModel):
     user_id: UUID
     amount: int
     currency: str
 
 
+# -------------------------
+# API Endpoint
+# -------------------------
 @router.post("", status_code=202)
 async def create_payment_api(
     payload: PaymentRequest,
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_session),
 ):
     if not idempotency_key:
         raise HTTPException(status_code=400, detail="Idempotency-Key required")
 
+    # -------------------------
+    # Rate limiting (best-effort)
+    # -------------------------
     allowed = await rate_limit(str(payload.user_id))
     if not allowed:
         raise HTTPException(status_code=429, detail="Too many requests")
 
-    # 🔥 Command ID (required for event-driven systems)
-    payment_id = str(uuid4())
+    # -------------------------
+    # Idempotency guard
+    # -------------------------
+    existing = await check_idempotency(db, idempotency_key)
+    if existing:
+        return {
+            "status": "accepted",
+            "payment_id": str(existing.id),
+            "idempotency_key": idempotency_key,
+        }
 
-    try:
-        publish_event(
-            event_type="payment.created.v1",
-            payload={
-                "payment_id": payment_id,          # 🔥 REQUIRED
-                "user_id": str(payload.user_id),
-                "amount": payload.amount,
-                "currency": payload.currency,
-                "idempotency_key": idempotency_key,
-            },
-        )
-    except Exception as exc:
-        # 🔥 FAIL-OPEN (API should not die)
-        logger.error(
-            "EVENT_PUBLISH_FAILED",
-            extra={"error": str(exc)},
-        )
+    # -------------------------
+    # Atomic write (Payment + Outbox)
+    # -------------------------
+    payment = await create_payment(
+        db=db,
+        user_id=payload.user_id,
+        amount=payload.amount,
+        currency=payload.currency,
+        idempotency_key=idempotency_key,
+    )
 
+    # -------------------------
+    # 202 Accepted (durable)
+    # -------------------------
     return {
         "status": "accepted",
-        "payment_id": payment_id,
+        "payment_id": str(payment.id),
         "idempotency_key": idempotency_key,
     }

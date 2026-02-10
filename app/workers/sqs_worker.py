@@ -3,18 +3,17 @@ import asyncio
 from typing import Any, Dict
 
 from app.core.logging import logger
+from app.events.schema import EventEnvelope
 from app.workers.payment_worker import process_payment
 from app.workers.notification_worker import process_notification
 
-print("🔥🔥 WORKER IMAGE VERSION: 2026-02-08-SQS-HANDLER-FINAL 🔥🔥")
+print("🔥🔥 WORKER IMAGE VERSION: 2026-02-10-OUTBOX-V1-SAFE 🔥🔥")
 
 
+# ==================================================
+# Core async handler
+# ==================================================
 async def _handle_records(event: Dict[str, Any]):
-    """
-    Async SQS worker.
-    Runs entirely inside ONE asyncio event loop.
-    """
-
     records = event.get("Records", [])
 
     logger.info(
@@ -24,56 +23,68 @@ async def _handle_records(event: Dict[str, Any]):
 
     for record in records:
         try:
-            body = json.loads(record["body"])
+            raw_body = record.get("body")
+            if not raw_body:
+                raise ValueError("Empty SQS body")
 
-            event_type = body.get("detail-type")
-            detail = body.get("detail", {})
+            body = json.loads(raw_body)
+
+            # ------------------------------------------
+            # STRICT event schema validation (🔥 PHASE 4)
+            # ------------------------------------------
+            event_envelope = EventEnvelope.model_validate(body)
+
+            event_type = event_envelope.event_type
+            version = event_envelope.version
+            payload = event_envelope.payload
 
             logger.info(
-                "SQS_EVENT_RECEIVED",
+                "DOMAIN_EVENT_RECEIVED",
                 extra={
                     "event_type": event_type,
-                    "detail": detail,
+                    "version": version,
+                    "event_id": str(event_envelope.event_id),
                 },
             )
 
-            if event_type == "payment.created.v1":
-                payment_id = detail.get("payment_id")
+            # ------------------------------------------
+            # VERSIONED routing (🔥 CRITICAL)
+            # ------------------------------------------
+            if event_type == "payment.created" and version == 1:
+                payment_id = payload.get("payment_id")
                 if not payment_id:
-                    raise ValueError("payment_id missing")
+                    raise ValueError("payment_id missing in payload")
 
                 await process_payment(payment_id)
 
-            elif event_type == "payment.success":
-                await process_notification("payment.success", detail)
+            elif event_type == "payment.success" and version == 1:
+                await process_notification("payment.success", payload)
 
-            elif event_type == "payment.failed":
-                await process_notification("payment.failed", detail)
+            elif event_type == "payment.failed" and version == 1:
+                await process_notification("payment.failed", payload)
 
             else:
                 logger.warning(
-                    "UNHANDLED_EVENT_TYPE",
-                    extra={"event_type": event_type},
+                    "UNSUPPORTED_EVENT_VERSION",
+                    extra={
+                        "event_type": event_type,
+                        "version": version,
+                    },
                 )
 
         except Exception as exc:
             logger.exception(
-                "SQS_MESSAGE_FAILED",
+                "SQS_RECORD_PROCESSING_FAILED",
                 extra={"error": str(exc)},
             )
-            raise  # SQS retry / DLQ
+            # 🔥 Force retry / DLQ
+            raise
 
 
+# ==================================================
+# Lambda entrypoint (SYNC)
+# ==================================================
 def handler(event: Dict[str, Any], context):
-    """
-    AWS Lambda entrypoint (SYNC).
-
-    asyncio.run():
-    - creates ONE loop
-    - runs async logic
-    - closes loop safely
-    """
-
     try:
         asyncio.run(_handle_records(event))
     except Exception as exc:
