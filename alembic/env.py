@@ -11,6 +11,11 @@ sys.path.append(os.getcwd())
 # ✅ CORRECT Base location
 from app.shared.models import Base
 
+# 🔥 IMPORTANT: import models so tables register
+import app.shared.models
+import app.workers.db.models.outbox
+
+
 config = context.config
 
 if config.config_file_name is not None:

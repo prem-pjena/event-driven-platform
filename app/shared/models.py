@@ -1,11 +1,9 @@
+from app.shared.base import Base
 from sqlalchemy import Column, String, Integer, Enum, DateTime, Date, Float
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import declarative_base
 from datetime import datetime
 import uuid
 import enum
-
-Base = declarative_base()
 
 
 # ------------------------

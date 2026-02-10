@@ -3,8 +3,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime
 import uuid
 
-from app.db.base import Base
-
+from app.shared.base import Base
 
 class OutboxEvent(Base):
     __tablename__ = "outbox_events"
