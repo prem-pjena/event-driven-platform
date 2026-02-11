@@ -49,6 +49,15 @@ resource "aws_security_group" "lambda_db_sg" {
     cidr_blocks = ["10.0.0.0/16"]
   }
 
+  # Allow PostgreSQL from Bastion (EC2 migrations)
+ingress {
+  from_port       = 5432
+  to_port         = 5432
+  protocol        = "tcp"
+  security_groups = [aws_security_group.bastion_sg.id]
+}
+
+
   # 🔥 REQUIRED: HTTPS inside VPC (VPC Endpoints)
   ingress {
     from_port = 443

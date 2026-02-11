@@ -13,10 +13,10 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
-print("🔥🔥 API IMAGE VERSION: 2026-02-07-FINAL-API-CLEAN 🔥🔥")
+logger.info("🔥🔥 API IMAGE VERSION: 2026-02-11-FINAL-API-CLEAN 🔥🔥")
 
 # --------------------------------------------------
-# Middleware: Request ID
+# Middleware: Request ID + structured logging
 # --------------------------------------------------
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
@@ -24,6 +24,7 @@ async def add_request_id(request: Request, call_next):
     request.state.request_id = request_id
 
     response = await call_next(request)
+
     response.headers["X-Request-ID"] = request_id
 
     logger.info(
@@ -32,29 +33,43 @@ async def add_request_id(request: Request, call_next):
             "request_id": request_id,
             "method": request.method,
             "path": request.url.path,
+            "status_code": response.status_code,
         },
     )
+
     return response
+
 
 # --------------------------------------------------
 # Routes
 # --------------------------------------------------
-app.include_router(payments.router, prefix="/payments", tags=["payments"])
-app.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
+app.include_router(
+    payments.router,
+    prefix="/payments",
+    tags=["payments"],
+)
+
+app.include_router(
+    notifications.router,
+    prefix="/notifications",
+    tags=["notifications"],
+)
 
 # --------------------------------------------------
-# Health
+# Health (ALB / Lambda safe)
 # --------------------------------------------------
-@app.get("/health")
+@app.get("/health", tags=["system"])
 async def health():
     return {"status": "ok"}
 
+
 # --------------------------------------------------
-# Startup (NO DB WORK IN API)
+# Startup (NO DB, NO NETWORK)
 # --------------------------------------------------
 @app.on_event("startup")
 async def startup():
-    logger.info("APPLICATION_STARTUP")
+    logger.info("APPLICATION_STARTUP_COMPLETE")
+
 
 # --------------------------------------------------
 # Lambda adapter (MUST be last)

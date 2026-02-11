@@ -16,30 +16,17 @@ resource "aws_sqs_queue" "payment_queue" {
 }
 
 ########################################
-# EventBridge → SQS Target (CORRECT)
+# EventBridge → SQS Target (🔥 FIXED 🔥)
+# Full EventBridge event is delivered
 ########################################
 resource "aws_cloudwatch_event_target" "payment_to_sqs" {
   rule           = aws_cloudwatch_event_rule.payment_events.name
   event_bus_name = aws_cloudwatch_event_bus.payments_bus.name
   arn            = aws_sqs_queue.payment_queue.arn
-
-  input_transformer {
-    input_paths = {
-      payment_id = "$.detail.payment_id"
-    }
-
-    # 🔥 QUOTES ARE MANDATORY 🔥
-    input_template = <<EOF
-{
-  "payment_id": "<payment_id>"
 }
-EOF
-  }
-}
-
 
 ########################################
-# 🔥 REQUIRED: Allow EventBridge to send to SQS
+# Allow EventBridge to send to SQS
 ########################################
 resource "aws_sqs_queue_policy" "allow_eventbridge" {
   queue_url = aws_sqs_queue.payment_queue.id

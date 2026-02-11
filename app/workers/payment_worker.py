@@ -6,7 +6,7 @@ from app.shared.models import Payment, PaymentStatus
 from app.services.fake_gateway import charge, PaymentGatewayError
 from app.core.logging import logger
 from app.core.locks import acquire_lock, release_lock
-from app.workers.db.models.outbox import OutboxEvent
+from app.db.models.outbox import OutboxEvent
 
 print("🔥🔥 WORKER IMAGE VERSION: 2026-02-10-PHASE4-OUTBOX-SAFE 🔥🔥")
 
@@ -22,7 +22,7 @@ async def process_payment(payment_id: str):
     - writes OUTBOX events (NOT EventBridge)
     """
 
-    from app.workers.db.session import create_session_factory
+    from app.db.session import create_session_factory
 
     engine, SessionLocal = create_session_factory()
 

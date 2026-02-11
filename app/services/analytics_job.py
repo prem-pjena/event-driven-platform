@@ -1,7 +1,7 @@
 from sqlalchemy.future import select
 from datetime import date
 
-from app.workers.db.session import create_session_factory
+from app.db.session import create_session_factory
 from app.shared.models import Payment, DailyPaymentAnalytics
 
 

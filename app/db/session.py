@@ -1,3 +1,4 @@
+# app/db/session.py
 import os
 import ssl
 from typing import AsyncGenerator, Tuple
@@ -9,9 +10,8 @@ from sqlalchemy.ext.asyncio import (
 )
 
 # ==================================================
-# SSL CONTEXT (THE FIX)
+# SSL CONTEXT (RDS / AURORA)
 # ==================================================
-
 _ssl_context = ssl.create_default_context()
 _ssl_context.check_hostname = False
 _ssl_context.verify_mode = ssl.CERT_NONE
@@ -25,27 +25,22 @@ def _get_database_url() -> str:
 
 
 # ==================================================
-# API / FastAPI (GLOBAL, REUSED)
+# API ENGINE (GLOBAL, REUSED ACROSS INVOCATIONS)
 # ==================================================
-
 _engine = None
 _SessionLocal = None
 
 
-def get_api_sessionmaker() -> async_sessionmaker[AsyncSession]:
+def _get_api_sessionmaker() -> async_sessionmaker[AsyncSession]:
     global _engine, _SessionLocal
 
     if _engine is None:
         _engine = create_async_engine(
             _get_database_url(),
-            echo=False,
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=0,
-            future=True,
-            connect_args={
-                "ssl": _ssl_context,  # ✅ FIXED
-            },
+            connect_args={"ssl": _ssl_context},
         )
 
         _SessionLocal = async_sessionmaker(
@@ -57,27 +52,25 @@ def get_api_sessionmaker() -> async_sessionmaker[AsyncSession]:
     return _SessionLocal
 
 
-async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    SessionLocal = get_api_sessionmaker()
+# ==================================================
+# ✅ FASTAPI DEPENDENCY (ONLY THING API IMPORTS)
+# ==================================================
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    SessionLocal = _get_api_sessionmaker()
     async with SessionLocal() as session:
         yield session
 
 
 # ==================================================
-# Workers / SQS / Jobs (PER INVOCATION)
+# WORKER SESSION FACTORY (PER INVOCATION)
 # ==================================================
-
-def create_session_factory() -> Tuple:
+def create_worker_session_factory() -> Tuple:
     engine = create_async_engine(
         _get_database_url(),
-        echo=False,
         pool_pre_ping=True,
         pool_size=5,
         max_overflow=0,
-        future=True,
-        connect_args={
-            "ssl": _ssl_context,  # ✅ FIXED
-        },
+        connect_args={"ssl": _ssl_context},
     )
 
     SessionLocal = async_sessionmaker(

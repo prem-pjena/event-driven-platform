@@ -68,8 +68,37 @@ resource "aws_iam_role_policy" "lambda_sqs_consumer_policy" {
           "sqs:GetQueueAttributes",
           "sqs:ChangeMessageVisibility"
         ]
-        Resource = aws_sqs_queue.payment_queue.arn
+        Resource = [
+          aws_sqs_queue.payment_queue.arn,
+          aws_sqs_queue.payment_dlq.arn
+        ]
       }
     ]
+  })
+}
+
+
+resource "aws_iam_role" "dlq_operator" {
+  name = "dlq-replay-operator"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = { AWS = "arn:aws:iam::395069633917:root" }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+resource "aws_iam_role_policy" "dlq_replay_permission" {
+  role = aws_iam_role.dlq_operator.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["lambda:InvokeFunction"]
+      Resource = aws_lambda_function.dlq_replay.arn
+    }]
   })
 }
