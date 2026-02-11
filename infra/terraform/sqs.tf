@@ -31,19 +31,23 @@ resource "aws_sqs_queue_policy" "allow_eventbridge" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "AllowEventBridgeSendMessage"
+        Sid    = "AllowEventBridgeFromPaymentsBus"
         Effect = "Allow"
+
         Principal = {
           Service = "events.amazonaws.com"
         }
+
         Action   = "sqs:SendMessage"
         Resource = aws_sqs_queue.payment_queue.arn
+
         Condition = {
-          ArnEquals = {
-            "aws:SourceArn" = aws_cloudwatch_event_rule.payment_events.arn
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:rule/${local.event_bus_name}/*"
           }
         }
       }
     ]
   })
 }
+
