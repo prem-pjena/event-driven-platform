@@ -13,7 +13,8 @@ from app.shared.models import Base
 
 # 🔥 IMPORTANT: import models so tables register
 import app.shared.models
-import app.workers.db.models.outbox
+from app.db.models.outbox import OutboxEvent
+
 
 
 config = context.config
