@@ -1,5 +1,7 @@
 import uuid
-from datetime import datetime
+import asyncio
+import json
+from datetime import datetime, timezone
 from sqlalchemy.future import select
 
 from app.shared.models import Payment, PaymentStatus
@@ -7,24 +9,26 @@ from app.services.fake_gateway import charge, PaymentGatewayError
 from app.core.logging import logger
 from app.core.locks import acquire_lock, release_lock
 from app.db.models.outbox import OutboxEvent
+from app.db.session import create_worker_session_factory
 
-print("🔥🔥 WORKER IMAGE VERSION: 2026-02-10-PHASE4-OUTBOX-SAFE 🔥🔥")
+print("🔥🔥 WORKER IMAGE VERSION: 2026-02-11-FINAL-PROD 🔥🔥")
 
 
+# --------------------------------------------------
+# Core business logic
+# --------------------------------------------------
 async def process_payment(payment_id: str):
     """
-    Phase 4–correct payment processor.
+    Production-grade payment processor.
 
-    Responsibilities:
+    Guarantees:
     - idempotent
-    - locked
-    - updates DB state
-    - writes OUTBOX events (NOT EventBridge)
+    - distributed locked
+    - atomic state + outbox write
+    - safe DB cleanup
     """
 
-    from app.db.session import create_session_factory
-
-    engine, SessionLocal = create_session_factory()
+    engine, SessionLocal = create_worker_session_factory()
 
     lock_token = await acquire_lock(f"payment:{payment_id}")
     if not lock_token:
@@ -33,6 +37,7 @@ async def process_payment(payment_id: str):
 
     try:
         async with SessionLocal() as session:
+
             result = await session.execute(
                 select(Payment).where(Payment.id == payment_id)
             )
@@ -58,11 +63,13 @@ async def process_payment(payment_id: str):
                 # -----------------------------
                 await charge(payment.amount)
 
+                processed_time = datetime.now(timezone.utc)
+
                 payment.status = PaymentStatus.SUCCESS
-                payment.processed_at = datetime.utcnow()
+                payment.processed_at = processed_time
 
                 # -----------------------------
-                # OUTBOX EVENT (🔥 ATOMIC)
+                # Atomic OUTBOX event
                 # -----------------------------
                 session.add(
                     OutboxEvent(
@@ -75,8 +82,9 @@ async def process_payment(payment_id: str):
                             "user_id": str(payment.user_id),
                             "amount": payment.amount,
                             "currency": payment.currency,
-                            "occurred_at": payment.processed_at.isoformat(),
+                            "occurred_at": processed_time.isoformat(),
                         },
+                        occurred_at=processed_time,
                     )
                 )
 
@@ -90,8 +98,10 @@ async def process_payment(payment_id: str):
             except PaymentGatewayError:
                 await session.rollback()
 
+                processed_time = datetime.now(timezone.utc)
+
                 payment.status = PaymentStatus.FAILED
-                payment.processed_at = datetime.utcnow()
+                payment.processed_at = processed_time
 
                 session.add(
                     OutboxEvent(
@@ -104,8 +114,9 @@ async def process_payment(payment_id: str):
                             "user_id": str(payment.user_id),
                             "amount": payment.amount,
                             "currency": payment.currency,
-                            "occurred_at": payment.processed_at.isoformat(),
+                            "occurred_at": processed_time.isoformat(),
                         },
+                        occurred_at=processed_time,
                     )
                 )
 
@@ -119,3 +130,32 @@ async def process_payment(payment_id: str):
     finally:
         await release_lock(f"payment:{payment_id}", lock_token)
         await engine.dispose()
+
+
+# --------------------------------------------------
+# Lambda batch processor
+# --------------------------------------------------
+async def run_worker(event):
+    records = event.get("Records", [])
+
+    for record in records:
+        try:
+            body = json.loads(record["body"])
+            detail = body.get("detail", {})
+            payment_id = detail.get("payment_id")
+
+            if not payment_id:
+                logger.warning("MISSING_PAYMENT_ID")
+                continue
+
+            await process_payment(payment_id)
+
+        except Exception as exc:
+            logger.exception("WORKER_RECORD_FAILED", extra={"error": str(exc)})
+
+
+# --------------------------------------------------
+# REQUIRED Lambda entrypoint
+# --------------------------------------------------
+def handler(event, context):
+    return asyncio.run(run_worker(event))

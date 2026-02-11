@@ -2,8 +2,8 @@
 # Dead Letter Queue
 ########################################
 resource "aws_sqs_queue" "payment_dlq" {
-  name                      = "${var.project_name}-payment-dlq"
-  message_retention_seconds = 1209600  # 14 days (max)
+  name                       = "${var.project_name}-payment-dlq"
+  message_retention_seconds  = 1209600  # 14 days
   visibility_timeout_seconds = 60
 }
 
@@ -19,19 +19,6 @@ resource "aws_sqs_queue" "payment_queue" {
     deadLetterTargetArn = aws_sqs_queue.payment_dlq.arn
     maxReceiveCount     = 5
   })
-}
-
-########################################
-# EventBridge → SQS Target
-########################################
-resource "aws_cloudwatch_event_target" "payment_to_sqs" {
-  rule           = aws_cloudwatch_event_rule.payment_events.name
-  event_bus_name = aws_cloudwatch_event_bus.payments_bus.name
-  arn            = aws_sqs_queue.payment_queue.arn
-
-  depends_on = [
-    aws_sqs_queue.payment_queue
-  ]
 }
 
 ########################################

@@ -22,11 +22,13 @@ resource "aws_lambda_function" "outbox_publisher" {
   }
 
   environment {
-    variables = {
-      DATABASE_URL = "postgresql+asyncpg://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:5432/${var.db_name}?ssl=true"
-      EVENT_BUS_NAME = aws_cloudwatch_event_bus.payments_bus.name
-    }
+  variables = {
+    DATABASE_URL = "postgresql+asyncpg://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:5432/${var.db_name}?ssl=true"
+
+    EVENT_BUS_NAME = local.event_bus_name
   }
+}
+
 
   depends_on = [
     aws_iam_role_policy.lambda_eventbridge_publish,

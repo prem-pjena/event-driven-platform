@@ -6,37 +6,28 @@ resource "aws_cloudwatch_event_bus" "payments_bus" {
 }
 
 ########################################
-# Payment Outcome Rule
+# Payment Events Rule
 ########################################
 resource "aws_cloudwatch_event_rule" "payment_events" {
   name           = "${var.project_name}-payment-events"
   event_bus_name = aws_cloudwatch_event_bus.payments_bus.name
 
+  # Match ALL events from publisher
   event_pattern = jsonencode({
     source = ["event-platform.payments"]
-    "detail-type" = [
-      "payment.success",
-      "payment.failed"
-    ]
   })
 }
 
 ########################################
-# Target → Notification Lambda
+# Target → SQS Queue
 ########################################
-resource "aws_cloudwatch_event_target" "payment_notifications_target" {
+resource "aws_cloudwatch_event_target" "payment_to_sqs" {
   rule           = aws_cloudwatch_event_rule.payment_events.name
   event_bus_name = aws_cloudwatch_event_bus.payments_bus.name
-  arn            = aws_lambda_function.api.arn
+  arn            = aws_sqs_queue.payment_queue.arn
+
+  depends_on = [
+    aws_sqs_queue_policy.allow_eventbridge
+  ]
 }
 
-########################################
-# Allow EventBridge to invoke Lambda
-########################################
-resource "aws_lambda_permission" "allow_eventbridge_invoke_api" {
-  statement_id  = "AllowEventBridgeInvokeAPI"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.api.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.payment_events.arn
-}

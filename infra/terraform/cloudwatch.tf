@@ -15,8 +15,8 @@ resource "aws_cloudwatch_metric_alarm" "payment_dlq_alarm" {
     QueueName = aws_sqs_queue.payment_dlq.name
   }
 
-  alarm_description   = "DLQ has messages — payment processing failures"
-  treat_missing_data  = "notBreaching"
+  alarm_description  = "DLQ has messages — payment processing failures"
+  treat_missing_data = "notBreaching"
 
   alarm_actions = [aws_sns_topic.alerts.arn]
 }
@@ -26,7 +26,7 @@ resource "aws_cloudwatch_metric_alarm" "payment_dlq_alarm" {
 ########################################
 resource "aws_cloudwatch_event_rule" "outbox_schedule" {
   name                = "${var.project_name}-outbox-schedule"
-  schedule_expression = "rate(1 minute)"   # 🔥 5 seconds not allowed
+  schedule_expression = "rate(1 minute)"
 }
 
 resource "aws_cloudwatch_event_target" "outbox_target" {

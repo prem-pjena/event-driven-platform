@@ -10,19 +10,15 @@ LOCK_TTL = 30
 
 
 async def acquire_lock(name: str) -> Optional[str]:
-    """
-    Acquire a Redis distributed lock.
-    Returns lock token if acquired, else None.
-    FAILS OPEN if Redis unavailable.
-    """
-    redis = await get_redis()   # 🔥 FIX: await
-    if not redis:
+    redis_client = await get_redis()
+
+    if not redis_client:
         logger.warning("LOCK_REDIS_UNAVAILABLE")
         return None
 
     token = str(uuid.uuid4())
 
-    acquired = await redis.set(
+    acquired = await redis_client.set(
         name=f"lock:{name}",
         value=token,
         nx=True,
@@ -38,11 +34,9 @@ async def acquire_lock(name: str) -> Optional[str]:
 
 
 async def release_lock(name: str, token: str) -> None:
-    """
-    Release lock only if token matches.
-    """
-    redis = await get_redis()   # 🔥 FIX: await
-    if not redis or not token:
+    redis_client = await get_redis()
+
+    if not redis_client or not token:
         return
 
     lua = """
@@ -54,7 +48,7 @@ async def release_lock(name: str, token: str) -> None:
     """
 
     try:
-        await redis.eval(lua, 1, f"lock:{name}", token)
+        await redis_client.eval(lua, 1, f"lock:{name}", token)
         logger.info("LOCK_RELEASED", extra={"name": name})
     except Exception:
         logger.exception("LOCK_RELEASE_FAILED")
