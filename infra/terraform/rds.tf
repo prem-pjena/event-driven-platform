@@ -1,3 +1,4 @@
+
 resource "aws_db_subnet_group" "db_subnet_group" {
   name       = "${var.project_name}-db-subnets"
   subnet_ids = [aws_subnet.subnet_a.id, aws_subnet.subnet_b.id]

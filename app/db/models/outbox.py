@@ -1,9 +1,10 @@
 from sqlalchemy import Column, String, DateTime, Integer, JSON
 from sqlalchemy.dialects.postgresql import UUID
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from app.shared.base import Base
+
 
 class OutboxEvent(Base):
     __tablename__ = "outbox_events"
@@ -21,8 +22,19 @@ class OutboxEvent(Base):
 
     payload = Column(JSON, nullable=False)
 
-    # 🔥 IMPORTANT FOR REPLAY / AUDIT
-    occurred_at = Column(DateTime, nullable=False)
+    # 🔥 IMPORTANT FOR REPLAY / AUDIT (must be timezone aware)
+    occurred_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    published_at = Column(DateTime, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    # ✅ FIXED — timezone aware
+    published_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+    )

@@ -28,5 +28,6 @@ def payment_created_event(payment: Payment) -> DomainEvent:
             "amount": payment.amount,
             "currency": payment.currency,
         },
-        "occurred_at": datetime.utcnow().isoformat(),
+        "occurred_at": datetime.utcnow(),
+
     }

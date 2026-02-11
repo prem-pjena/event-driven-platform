@@ -1,7 +1,9 @@
 from sqlalchemy import select
 from datetime import datetime, timezone
+from sqlalchemy.ext.asyncio import AsyncSession
+import asyncio
 
-from app.db.session import create_session_factory
+from app.db.session import create_worker_session_factory
 from app.db.models.outbox import OutboxEvent
 from app.services.event_publisher import publish_event
 from app.core.logging import logger
@@ -21,66 +23,83 @@ async def run_outbox_publisher():
     - Lambda-safe resource cleanup
     """
 
-    engine, SessionLocal = create_session_factory()
+    engine, SessionLocal = create_worker_session_factory()
 
     try:
-        async with SessionLocal() as session:
-            result = await session.execute(
-                select(OutboxEvent)
-                .where(OutboxEvent.published_at.is_(None))
-                .order_by(OutboxEvent.occurred_at.asc())  # 🔥 ORDER MATTERS
-                .limit(BATCH_SIZE)
-                .with_for_update(skip_locked=True)
-            )
+        async with SessionLocal() as session:  # type: AsyncSession
 
-            events = result.scalars().all()
+            async with session.begin():
+                result = await session.execute(
+                    select(OutboxEvent)
+                    .where(OutboxEvent.published_at.is_(None))
+                    .order_by(OutboxEvent.occurred_at.asc())
+                    .limit(BATCH_SIZE)
+                    .with_for_update(skip_locked=True)
+                )
 
-            if not events:
-                logger.info("OUTBOX_EMPTY")
-                return
+                events = result.scalars().all()
 
-            for event in events:
-                try:
-                    # 🔐 Idempotent publish (event_id is the key)
-                    publish_event(
-                        event.event_type,
-                        {
-                            **event.payload,
-                            "event_id": str(event.event_id),
-                            "event_type": event.event_type,
-                            "version": event.version,
-                            "occurred_at": event.occurred_at.isoformat(),
-                            "replayed": False,
-                        },
-                    )
+                if not events:
+                    logger.info("OUTBOX_EMPTY")
+                    return {"status": "empty"}
 
-                    # ✅ Mark published ONLY after successful publish
-                    event.published_at = datetime.now(timezone.utc)
+                published_count = 0
 
-                    logger.info(
-                        "OUTBOX_EVENT_PUBLISHED",
-                        extra={
-                            "event_id": str(event.event_id),
-                            "event_type": event.event_type,
-                            "aggregate_id": str(event.aggregate_id),
-                        },
-                    )
+                for event in events:
+                    try:
+                        # ✅ CORRECT KEYWORD CALL
+                        publish_event(
+                            event_type=event.event_type,
+                            version=str(event.version),
+                            payload={
+                                **event.payload,
+                                "event_id": str(event.event_id),
+                                "event_type": event.event_type,
+                                "version": event.version,
+                                "occurred_at": event.occurred_at.isoformat(),
+                                "replayed": False,
+                            },
+                            event_id=str(event.event_id),
+                        )
 
-                except Exception as exc:
-                    # ❌ DO NOT commit this event
-                    logger.exception(
-                        "OUTBOX_EVENT_PUBLISH_FAILED",
-                        extra={
-                            "event_id": str(event.event_id),
-                            "event_type": event.event_type,
-                            "error": str(exc),
-                        },
-                    )
-                    # Continue with other events (partial failure safe)
+                        event.published_at = datetime.now(timezone.utc)
+                        published_count += 1
 
-            # ✅ Commit only successfully published events
-            await session.commit()
+                        logger.info(
+                            "OUTBOX_EVENT_PUBLISHED",
+                            extra={
+                                "event_id": str(event.event_id),
+                                "event_type": event.event_type,
+                                "aggregate_id": str(event.aggregate_id),
+                            },
+                        )
+
+                    except Exception as exc:
+                        logger.exception(
+                            "OUTBOX_EVENT_PUBLISH_FAILED",
+                            extra={
+                                "event_id": str(event.event_id),
+                                "event_type": event.event_type,
+                                "error": str(exc),
+                            },
+                        )
+                        # Do NOT mark published
+
+                return {
+                    "status": "processed",
+                    "published_count": published_count,
+                }
 
     finally:
-        # 🔥 ABSOLUTELY REQUIRED IN LAMBDA
         await engine.dispose()
+
+
+# --------------------------------------------------
+# 🔥 Lambda Entrypoint
+# --------------------------------------------------
+def handler(event, context):
+    """
+    AWS Lambda entrypoint.
+    Fully executes async publisher.
+    """
+    return asyncio.run(run_outbox_publisher())

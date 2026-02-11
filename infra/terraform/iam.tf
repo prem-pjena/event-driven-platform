@@ -1,3 +1,6 @@
+# ==================================================
+# Lambda Execution Role
+# ==================================================
 resource "aws_iam_role" "lambda_role" {
   name = "${var.project_name}-lambda-role"
 
@@ -11,94 +14,103 @@ resource "aws_iam_role" "lambda_role" {
   })
 }
 
-# --------------------------------------------------
-# Basic logging (CloudWatch)
-# --------------------------------------------------
+# ==================================================
+# Basic Logging (CloudWatch)
+# ==================================================
 resource "aws_iam_role_policy_attachment" "lambda_basic" {
   role       = aws_iam_role.lambda_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# --------------------------------------------------
-# VPC networking (ENIs)
-# --------------------------------------------------
+# ==================================================
+# VPC Networking (ENI access)
+# ==================================================
 resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
   role       = aws_iam_role.lambda_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
-# --------------------------------------------------
-# EventBridge publish (API + Worker)
-# --------------------------------------------------
+# ==================================================
+# EventBridge Publish (API + Publisher)
+# ==================================================
 resource "aws_iam_role_policy" "lambda_eventbridge_publish" {
-  name = "${var.project_name}-eventbridge-publish"
+  name = "${var.project_name}-lambda-eventbridge-publish"
   role = aws_iam_role.lambda_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "events:PutEvents"
-        ]
-        Resource = aws_cloudwatch_event_bus.payments_bus.arn
-      }
-    ]
+    Statement = [{
+      Effect = "Allow"
+      Action = ["events:PutEvents"]
+      Resource = aws_cloudwatch_event_bus.payments_bus.arn
+    }]
   })
 }
 
-
-
-# --------------------------------------------------
-# 🔥 CRITICAL FIX: SQS → Lambda Worker permissions
-# --------------------------------------------------
+# ==================================================
+# SQS Consumer (Worker)
+# ==================================================
 resource "aws_iam_role_policy" "lambda_sqs_consumer_policy" {
   name = "${var.project_name}-lambda-sqs-consumer"
   role = aws_iam_role.lambda_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "sqs:ReceiveMessage",
-          "sqs:DeleteMessage",
-          "sqs:GetQueueAttributes",
-          "sqs:ChangeMessageVisibility"
-        ]
-        Resource = [
-          aws_sqs_queue.payment_queue.arn,
-          aws_sqs_queue.payment_dlq.arn
-        ]
-      }
-    ]
-  })
-}
-
-
-resource "aws_iam_role" "dlq_operator" {
-  name = "dlq-replay-operator"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
     Statement = [{
       Effect = "Allow"
-      Principal = { AWS = "arn:aws:iam::395069633917:root" }
-      Action = "sts:AssumeRole"
+      Action = [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ChangeMessageVisibility"
+      ]
+      Resource = [
+        aws_sqs_queue.payment_queue.arn,
+        aws_sqs_queue.payment_dlq.arn
+      ]
     }]
   })
 }
-resource "aws_iam_role_policy" "dlq_replay_permission" {
-  role = aws_iam_role.dlq_operator.id
+
+# ==================================================
+# SQS Publisher (Outbox + DLQ Replay)
+# ==================================================
+resource "aws_iam_role_policy" "lambda_sqs_publish" {
+  name = "${var.project_name}-lambda-sqs-publish"
+  role = aws_iam_role.lambda_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["lambda:InvokeFunction"]
-      Resource = aws_lambda_function.dlq_replay.arn
+      Effect = "Allow"
+      Action = ["sqs:SendMessage"]
+      Resource = aws_sqs_queue.payment_queue.arn
     }]
+  })
+}
+
+########################################
+# Lambda → Secrets Manager Access
+########################################
+
+resource "aws_iam_role_policy" "lambda_secrets_access" {
+  name = "${var.project_name}-lambda-secrets-access"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = [
+          aws_secretsmanager_secret.database_url.arn,
+          aws_secretsmanager_secret.database_url_sync.arn,
+          aws_secretsmanager_secret.redis_url.arn
+        ]
+      }
+    ]
   })
 }

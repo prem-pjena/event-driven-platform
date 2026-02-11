@@ -30,7 +30,7 @@ def publish_event(
             Entries=[
                 {
                     "Source": "event-platform.payments",
-                    "DetailType": f"{event_type}.{version}",
+                    "DetailType": event_type,   # 🔥 DO NOT concatenate version here
                     "Detail": json.dumps(payload),
                     "EventBusName": EVENT_BUS_NAME,
                 }

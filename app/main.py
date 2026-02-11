@@ -74,8 +74,7 @@ async def startup():
 # --------------------------------------------------
 # Lambda adapter (MUST be last)
 # --------------------------------------------------
-handler = Mangum(app
+handler = Mangum(
     app,
-    api_gateway_base_path=None,
-
+    lifespan="off",
 )
